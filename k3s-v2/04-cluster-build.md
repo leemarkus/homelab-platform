@@ -1,6 +1,6 @@
 # 04 — Cluster Build (Phase 2)
 
-> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Six baselined VMs → an HA Kubernetes cluster with Cilium and a VIP.
 Order matters: **node-1 → kube-vip → Cilium → node-2/3 → workers**.

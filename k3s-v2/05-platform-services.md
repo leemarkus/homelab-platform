@@ -1,6 +1,6 @@
 # 05 — Platform Services (Phases 3–6)
 
-> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Everything between "Kubernetes works" and "apps can live here."
 After Phase 4, **ArgoCD owns all of this**: the values files below are

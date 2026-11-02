@@ -1,6 +1,6 @@
 # 06 — Operations (Day-2 Workflows)
 
-> **Status (2026-09-25):** current for day-2 procedures; written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** current for day-2 procedures; written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Standalone procedures for running the cluster day to day. Each workflow is complete: prerequisites, steps, verification, rollback.
 Diagnostics cheatsheet and gotchas at the bottom.

@@ -1,6 +1,6 @@
 # 07 — Testing Strategy
 
-> **Status (2026-09-25):** design intent, written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** design intent, written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Three tiers: **phase gates** (prove each build phase before moving on),
 **continuous validation** (catch rot), and **chaos drills** (prove the HA

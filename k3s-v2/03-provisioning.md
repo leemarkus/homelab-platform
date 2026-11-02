@@ -1,6 +1,6 @@
 # 03 — Provisioning (Phases 0–1)
 
-> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Everything needed to go from three Proxmox hosts to six booted, baselined
 Ubuntu VMs. The code blocks here are **reference copies**; the live files

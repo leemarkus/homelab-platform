@@ -1,6 +1,6 @@
 # 08 — Backups & Disaster Recovery
 
-> **Status (2026-09-25):** current as the incident procedure; written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** current as the incident procedure; written for the 2026-07 build — [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 Four independent layers, each restoring a different class of failure, all
 landing **outside the cluster** (MinIO/PBS on the pve-4 storage node). This

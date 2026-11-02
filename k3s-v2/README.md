@@ -57,7 +57,7 @@ the failure domain is the physical host. It was built for two purposes at once:
 | [07-testing.md](07-testing.md) | Acceptance gates, validation, chaos drills | you're proving it works |
 | [08-backup-dr.md](08-backup-dr.md) | Backup layers, RPO/RTO targets, restore procedure per failure scenario | something broke, or you're drilling |
 | [09-traffic-flows.md](09-traffic-flows.md) | Sequence diagrams for request paths, GitOps, certificate issuance, backups | you're tracing a packet or a deploy |
-| [AS-BUILT.md](AS-BUILT.md) | What actually runs, the traps hit during the build, drill results | always, first |
+| [AS-BUILT.md](AS-BUILT.md) | What ran at the July 2026 snapshot, the traps hit during the build, drill results | always, first |
 | [docs/longhorn-multipath.md](docs/longhorn-multipath.md) | Keeping multipathd away from Longhorn's iSCSI devices | a Longhorn volume will not attach |
 | [live/](live/README.md) | The configs and Helm values as applied (tokens redacted) | you need the exact values |
 

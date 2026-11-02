@@ -1,6 +1,6 @@
 # 01 — Architecture
 
-> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) is authoritative for what is running ([README](README.md)).
+> **Status (2026-09-25):** design intent, written as the 2026-07 build plan. [AS-BUILT.md](AS-BUILT.md) records what was running at its July 2026 snapshot ([README](README.md)).
 
 The what and the where. For the *why*, see
 [02-design-decisions.md](02-design-decisions.md).
@@ -29,7 +29,7 @@ flowchart TB
     OPN --- SW["TP-Link managed switch<br/>198.51.100.2"]
 
     subgraph LAN1["main LAN 198.51.100.0/24"]
-        PVE4["pve-4 · 198.51.100.14<br/>Minisforum N5 Pro<br/>TrueNAS .98 · PBS .97<br/>edge .90 · apps .91 · obs .92"]
+        PVE4["pve-4 · 198.51.100.14<br/>Minisforum N5 Pro<br/>TrueNAS .50 · PBS .51<br/>edge .40 · apps .41 · obs .42"]
         PI["Raspberry Pi 5 · 198.51.100.55<br/>Pi-hole (primary)"]
     end
 
