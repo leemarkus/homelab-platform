@@ -170,3 +170,7 @@ This repository is a curated public copy of a private one. Addresses are
 RFC 5737 documentation ranges, hostnames are placeholders (`node-1`…`node-6`,
 `pve-1`…`pve-5`, `*.example.com`), and the lab's other services, credentials
 and internal planning stay in the private repository.
+
+## License
+
+[MIT](LICENSE)
