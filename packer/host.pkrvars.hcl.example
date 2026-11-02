@@ -1,0 +1,6 @@
+# Per-host build inputs. Copy to host-<name>.pkrvars.hcl (not committed) and pass
+# with -var-file. One file per Proxmox host, because each host has its own
+# datastore and its own template VMID.
+proxmox_node  = "pve-1"
+template_vmid = 900
+datastore     = "pve1-data"

@@ -1,0 +1,120 @@
+---
+# Conservative node hardening. See defaults/main.yml for what is deliberately
+# absent and why.
+
+# --- SSH -------------------------------------------------------------------
+- name: SSH hardening
+  when: harden_ssh
+  block:
+    - name: Assert the operator still has a key on the box
+      # Ordering guard, not theatre. If this role disabled password auth on a
+      # node whose authorized_keys never got populated (a template regression, a
+      # cloud-init that did not run), the next disconnect is permanent. Check
+      # before changing, not after.
+      stat:
+        path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+      register: ak
+
+    - name: Refuse to disable password auth without a working key
+      assert:
+        that:
+          - ak.stat.exists
+          - ak.stat.size > 0
+        fail_msg: >-
+          /home/{{ ansible_user }}/.ssh/authorized_keys is missing or empty.
+          Disabling password authentication now would lock this node out. Fix
+          the key first.
+        quiet: true
+
+    - name: Apply sshd settings
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?\\s*{{ item.key }}\\b"
+        line: "{{ item.key }} {{ item.value }}"
+        state: present
+        validate: "/usr/sbin/sshd -t -f %s"
+      loop:
+        - { key: PermitRootLogin, value: "{{ harden_ssh_permit_root_login }}" }
+        - { key: PasswordAuthentication, value: "{{ harden_ssh_password_authentication }}" }
+        - { key: MaxAuthTries, value: "{{ harden_ssh_max_auth_tries }}" }
+        - { key: X11Forwarding, value: "no" }
+      loop_control:
+        label: "{{ item.key }}"
+      notify: Reload sshd
+      # `validate` runs sshd -t against the candidate file, so a malformed
+      # directive fails here instead of at the next sshd restart — which on a
+      # remote node means it fails while you can still get in.
+
+# --- Kernel ----------------------------------------------------------------
+- name: Kernel parameter hardening
+  when: harden_sysctl
+  # ansible.posix, not the bare `sysctl` name — the module moved out of core and
+  # a bare reference fails at parse time, not at run time. ansible.posix 2.1.0 is
+  # installed alongside community.general 12.3.0.
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/60-hardening.conf
+    state: present
+    reload: true
+  loop:
+    # Ignore ICMP redirects — a redirect can reroute node traffic.
+    - { name: net.ipv4.conf.all.accept_redirects, value: "0" }
+    - { name: net.ipv4.conf.all.send_redirects, value: "0" }
+    - { name: net.ipv6.conf.all.accept_redirects, value: "0" }
+    # Source routing has no legitimate use here.
+    - { name: net.ipv4.conf.all.accept_source_route, value: "0" }
+    - { name: net.ipv6.conf.all.accept_source_route, value: "0" }
+    # Log martians — cheap, and useful when chasing a VLAN misconfiguration.
+    - { name: net.ipv4.conf.all.log_martians, value: "1" }
+    # Restrict dmesg and kernel pointers from unprivileged users.
+    - { name: kernel.dmesg_restrict, value: "1" }
+    - { name: kernel.kptr_restrict, value: "1" }
+    # SYN flood mitigation.
+    - { name: net.ipv4.tcp_syncookies, value: "1" }
+    # Core dumps from setuid binaries.
+    - { name: fs.suid_dumpable, value: "0" }
+  loop_control:
+    label: "{{ item.name }}"
+  # NOT SET, on purpose: net.ipv4.ip_forward, rp_filter, and the bridge-nf
+  # sysctls. Cilium manages those itself and fighting it produces intermittent
+  # pod-to-pod failures that present as flaky applications.
+
+# --- Patching --------------------------------------------------------------
+- name: Unattended security upgrades
+  when: harden_unattended_upgrades
+  block:
+    - name: Install unattended-upgrades
+      apt:
+        name: unattended-upgrades
+        state: present
+        update_cache: true
+      # apt under dropped capabilities needs this; harmless otherwise and it
+      # matches the workaround the gitops repository uses for the same problem.
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Security updates only; reboot policy per host
+      copy:
+        dest: /etc/apt/apt.conf.d/52-homelab-unattended
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          // MANAGED BY ANSIBLE — role hardening.
+          // Security pocket only. k3s itself is upgraded by
+          // system-upgrade-controller from git, never by apt.
+          Unattended-Upgrade::Allowed-Origins {
+              "${distro_id}:${distro_codename}-security";
+          };
+          // Reboot policy is per-host (harden_unattended_reboot). k3s nodes:
+          // never — an unplanned reboot on a 3-node etcd quorum is how you
+          // lose quorum by accident; reboots are drained and deliberate.
+          // Single-purpose VMs: bounded window, clear of the backup timeline.
+          Unattended-Upgrade::Automatic-Reboot "{{ harden_unattended_reboot | ternary('true', 'false') }}";
+          {% if harden_unattended_reboot %}
+          Unattended-Upgrade::Automatic-Reboot-Time "{{ harden_unattended_reboot_time }}";
+          Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+          {% endif %}
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";

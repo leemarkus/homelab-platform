@@ -1,0 +1,8 @@
+---
+- name: Reload sshd
+  # reload, not restart: a reload re-reads config without dropping the
+  # connection Ansible is currently using. A restart on a bad config would end
+  # the run and the session together.
+  systemd:
+    name: ssh
+    state: reloaded

@@ -1,0 +1,84 @@
+---
+# Unattended security upgrades with bounded reboot windows — the non-k3s hosts.
+#
+# Scope: the single-purpose VMs and the Pi. The k3s nodes (v2 + preprod) get
+# the same patching via `k3s-node.yml` → role hardening, deliberately WITHOUT
+# auto-reboot (etcd quorum; SUC owns drained reboots). The Proxmox hypervisors
+# are out of scope on purpose: PVE kernel updates and hypervisor reboots take
+# every guest with them and stay manual/deliberate.
+#
+# Reboot windows are chosen clear of the nightly backup timeline:
+# 22:30 vzdump → 02:00 second pass + Velero → 02:30 pbs2 pull-sync → 03:00
+# etcd → 03:30 prunes + forgejo pg_dump. Nothing runs after ~03:35.
+#   04:30 — tier VMs (edge/apps/observability) + Pi. Independent services;
+#           simultaneous reboot is acceptable (reboots only happen on a
+#           reboot-required patch, i.e. rarely).
+#   04:45 — forgejo VM. Offset from the tier VMs so the git server is not
+#           down at the same moment as the edge proxy fronting it.
+#   05:30 — pbs + pbs2. Last, with the widest margin after their own 02:30
+#           sync and 03:30 prune; pbs's NFS datastore remounts on access
+#           (x-systemd.automount).
+#
+# Only the patching third of the hardening role runs here — harden_ssh and
+# harden_sysctl stay off so this playbook cannot plausibly lock anything out
+# (the role's own design rule). Harden those separately and deliberately.
+
+- name: Unattended upgrades — tier VMs + Pi (04:30 window)
+  hosts: tier_vms:raspberry_pi
+  become: true
+  roles:
+    - role: hardening
+      vars:
+        harden_ssh: false
+        harden_sysctl: false
+        harden_unattended_upgrades: true
+        harden_unattended_reboot: true
+        harden_unattended_reboot_time: "04:30"
+
+- name: Unattended upgrades — forgejo VM (04:45 window)
+  hosts: forgejo
+  become: true
+  roles:
+    - role: hardening
+      vars:
+        harden_ssh: false
+        harden_sysctl: false
+        harden_unattended_upgrades: true
+        harden_unattended_reboot: true
+        harden_unattended_reboot_time: "04:45"
+
+- name: Unattended upgrades — PBS instances (05:30 window)
+  hosts: pbs_servers
+  become: true
+  roles:
+    - role: hardening
+      vars:
+        harden_ssh: false
+        harden_sysctl: false
+        harden_unattended_upgrades: true
+        harden_unattended_reboot: true
+        harden_unattended_reboot_time: "05:30"
+
+- name: Verify the rendered policy on every host just changed
+  hosts: tier_vms:raspberry_pi:forgejo:pbs_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read back 52-homelab-unattended
+      command: cat /etc/apt/apt.conf.d/52-homelab-unattended
+      register: uu_conf
+      changed_when: false
+
+    - name: Assert reboot policy is present and bounded
+      assert:
+        that:
+          - "'Automatic-Reboot \"true\"' in uu_conf.stdout"
+          - "'Automatic-Reboot-Time' in uu_conf.stdout"
+        fail_msg: "{{ inventory_hostname }}: rendered policy lacks the bounded reboot window"
+        quiet: true
+
+    - name: Confirm the apt timers are active
+      command: systemctl is-active apt-daily.timer apt-daily-upgrade.timer
+      register: uu_timers
+      changed_when: false
+      failed_when: uu_timers.stdout_lines | unique != ['active']

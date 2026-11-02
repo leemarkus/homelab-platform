@@ -1,0 +1,95 @@
+---
+# Cilium CNI. Added 2026-07-27 because the "build a node from code" chain
+# stopped one step short of a working node: the k3s_node role writes
+# `flannel-backend: none` + `disable-kube-proxy: true`, which is correct for
+# this lab but leaves the node NotReady ("cni plugin not initialized") until
+# something supplies the CNI. Production's Cilium was a hand-run `helm install`
+# documented in k3s-v2/04-cluster-build.md and owned by no code at all, so
+# preprod-1 came up with no pod networking and nothing to fix it.
+#
+# OFF BY DEFAULT, DELIBERATELY. This role installs via k3s's HelmChart
+# controller, so on a cluster whose Cilium something else installed it would be
+# a *second*, competing manager of the same component. Set `cilium_manage: true`
+# per host group only where this role is the intended owner. Today that is
+# `k3s_preprod` and `k3s_v2_control` (production was adopted 2026-07-28, see
+# docs/runbooks/cilium-adoption.md).
+cilium_manage: false
+
+# One-time, per cluster, and it stays false in every group_vars file forever.
+# Set it only on the command line for the single run that hands an existing
+# hand-installed Cilium over to this role:
+#
+#   ansible-playbook … -e cilium_adopt=true
+#
+# WHY A FLAG AND NOT JUST DELETING THE GUARD. Adoption is safe exactly once,
+# under a human watching it, with the values already proven equal
+# (scripts/verify-cilium-values.sh). The guard below is what stops an ordinary
+# playbook run — a hardening tweak, an unrelated re-run — from silently
+# becoming a CNI event on the cluster's most load-bearing component. Removing
+# the guard would buy nothing and cost that.
+cilium_adopt: false
+
+# The version this role deploys. A bump takes effect only when the role runs:
+# preprod-1 first, then k3s_v2_control (docs/runbooks/cilium-adoption.md,
+# "The upgrade procedure"). Check the live daemonset image for what runs now.
+cilium_version: "1.17.18"
+cilium_namespace: kube-system
+
+# Marks this as a chart k3s must install to bring the cluster up. Required for
+# any CNI — see the comment in the template; without it the install deadlocks
+# against the not-ready taint. Only turn this off if something else is already
+# providing pod networking before this role runs.
+cilium_bootstrap: true
+
+# With kube-proxy replaced, Cilium needs a direct API endpoint — it cannot use
+# the in-cluster Service before it has itself provided the networking for it.
+# Production points at the kube-vip VIP; a single-node cluster has no VIP, so
+# this defaults to the node's own address.
+cilium_k8s_service_host: "{{ ansible_host }}"
+cilium_k8s_service_port: 6443
+
+# 1 everywhere. **Production also runs 1** — checked against the live release
+# and deployment on 2026-07-28. An earlier comment here claimed production ran
+# 2 and that this was a single-node concession; the value was right by
+# coincidence and the reason was invented. Left as a marker of why the adoption
+# runbook opens with a render-and-diff rather than a reading of this file.
+#
+# If a node ever does run 2 with only one schedulable node, the second replica
+# sits Pending forever on anti-affinity and reads as a broken install during
+# every subsequent upgrade test.
+cilium_operator_replicas: 1
+
+# `cluster-pool` matches the LIVE production configmap. Note that
+# k3s-v2/04-cluster-build.md says `mode: kubernetes` — that doc is wrong, and
+# the live cluster is the authority (checked 2026-07-27).
+cilium_ipam_mode: cluster-pool
+cilium_cluster_pool_cidr: "10.42.0.0/16"
+# Production sets this explicitly and it is also Cilium's own default, so
+# omitting it renders the same cluster. Kept anyway: the adoption in
+# docs/runbooks/cilium-adoption.md turns on the rendered values being a
+# byte-for-byte match of `helm get values cilium`, and "same in effect" is a
+# judgement call this role should not be asking anyone to make at 02:00.
+cilium_cluster_pool_mask_size: 24
+
+# NOT COSMETIC, AND NOT A DEFAULT. Production runs qps 50 / burst 100 — live in
+# cilium-config as `k8s-client-qps = 50` / `k8s-client-burst = 100`. This role
+# omitted both until 2026-07-28, which meant adopting production with it would
+# have silently reset the CNI's API client to the chart's defaults on a 6-node
+# cluster. That failure has the worst possible shape: the upgrade applies
+# cleanly, every check goes green, and the cost only shows up later under load,
+# far from the change that caused it.
+cilium_client_rate_limit_qps: 50
+cilium_client_rate_limit_burst: 100
+
+cilium_l2announcements: true
+cilium_external_ips: true
+
+# Hubble matches production so that observability chart changes are testable
+# here rather than only in prod. Turn off if this node ever needs the memory
+# back — it is not load-bearing for CNI.
+cilium_hubble_relay: true
+cilium_hubble_ui: true
+
+# How long to wait for the node to actually reach Ready. Generous: the first
+# install pulls images over the WAN.
+cilium_wait_timeout: 420

@@ -1,0 +1,12 @@
+# node-4/5/6 — agents. Applied at /etc/rancher/k3s/config.yaml, then:
+#   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.34.4+k3s1 sh -s - agent
+# Token redacted (the real value is kept outside the repository). node-ip/zone per node.
+#
+# NOTE: do NOT put `disable-kube-proxy` here — it is not a valid *agent* flag
+# in k3s v1.34.x and makes k3s-agent exit fatally. Agents inherit the
+# kube-proxy-disabled setting cluster-wide from the servers.
+server: https://192.0.2.10:6443
+token: __TOKEN__
+node-ip: 192.0.2.21              # node-5 -> .22, node-6 -> .23
+node-label:
+  - topology.kubernetes.io/zone=pve-1   # node-5 -> pve-2, node-6 -> pve-3

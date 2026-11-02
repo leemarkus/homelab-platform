@@ -1,0 +1,88 @@
+# MANAGED BY ANSIBLE — role k3s_node. Do not edit on the node; edit the role.
+#
+# kube-apiserver audit policy. Added 2026-08-05.
+#
+# WHY THIS EXISTS
+#   `audit-log-path` had been set since the 2026-07-05 build and the file existed
+#   at the configured path with correct ownership — and was 0 bytes, because
+#   there was no policy file. kube-apiserver's default policy records NOTHING, so
+#   the cluster had no API audit trail while looking fully configured. That is the
+#   failure this file fixes; see for the full write-up.
+#
+# ORDER IS THE SEMANTICS. Rules are evaluated top to bottom and the FIRST match
+# wins, so the noise-floor drops must precede the catch-alls, and the catch-all
+# `level: None` must be last. Reordering this file changes what is recorded.
+#
+# ⚠️ NEVER raise secrets/configmaps above `Metadata`. `Request` or
+# `RequestResponse` on those resources writes the secret VALUES into a plaintext
+# file on the control-plane root disk — which would convert the audit trail into
+# the single largest credential leak in the lab. Metadata still answers who
+# read or wrote which secret and when, which is the actual question.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+
+# RequestReceived doubles every entry and carries nothing the completed stage
+# does not already have.
+omitStages:
+  - RequestReceived
+
+rules:
+  # --- noise floor ---------------------------------------------------------
+  # Probes and discovery endpoints are polled continuously by kubelets, Cilium
+  # and Prometheus. Logging them buries the events worth having.
+  - level: None
+    nonResourceURLs:
+      - /healthz*
+      - /livez*
+      - /readyz*
+      - /version
+      - /metrics
+      - /openapi*
+      - /apis
+      - /api
+
+  # Nodes reading their own state, and kube-proxy-style watches.
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # Leader election renews a Lease every few seconds per controller. This alone
+  # would be the majority of the log.
+  - level: None
+    resources:
+      - group: "coordination.k8s.io"
+        resources: ["leases"]
+    verbs: ["get", "update"]
+
+  # --- what is actually worth keeping --------------------------------------
+  # Metadata ONLY — see the warning in the header before changing this.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+      - group: "bitnami.com"
+        resources: ["sealedsecrets"]
+
+  # Who was allowed to do what.
+  - level: Metadata
+    resources:
+      - group: "authentication.k8s.io"
+      - group: "authorization.k8s.io"
+      - group: "rbac.authorization.k8s.io"
+
+  # The highest-value events in the whole log: a human getting a shell inside a
+  # running pod. Worth the full request/response record.
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+
+  # Everything that CHANGES state, anywhere, by anyone.
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+
+  # Everything left is read traffic that did not match a rule above. Dropped on
+  # purpose: the reads worth keeping (secrets, RBAC) are matched earlier, and an
+  # unbounded record of every list/watch is what makes audit logs get switched
+  # off. Bounded and read beats complete and ignored.
+  - level: None

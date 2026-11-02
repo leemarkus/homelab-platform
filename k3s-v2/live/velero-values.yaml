@@ -1,0 +1,47 @@
+# Velero — daily cluster-object backup to MinIO on TrueNAS (s3.example.com).
+# Volume DATA is Longhorn's job (weekly backup to the same bucket); Velero
+# handles the k8s objects, so node-agent + snapshots are off.
+# helm install velero vmware-tanzu/velero --version 10.0.1 -n velero \
+#   --create-namespace -f velero-values.yaml
+# The chart's CRD-upgrade hook uses docker.io/bitnami/kubectl, which no
+# longer exists (Bitnami's 2025 registry purge). Fresh installs don't need
+# the hook — helm installs the chart's crds/ natively.
+upgradeCRDs: false
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.12.1
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: lab-backups
+      prefix: velero
+      config:
+        region: us-east-1
+        s3ForcePathStyle: "true"
+        s3Url: https://s3.example.com
+  volumeSnapshotLocation: [] # no volume snapshots — Longhorn owns volume data
+
+snapshotsEnabled: false
+deployNodeAgent: false
+
+credentials:
+  useSecret: true
+  existingSecret: velero-minio-credentials # created out-of-band; seal later
+
+schedules:
+  daily-objects:
+    disabled: false
+    schedule: "0 2 * * *"
+    template:
+      ttl: 720h # 30 days
+      snapshotVolumes: false
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 512Mi }

@@ -1,0 +1,45 @@
+#cloud-config
+# Ubuntu 24.04 autoinstall answers for the k3s golden template.
+# Consumed by Packer's HTTP server at build time only — this is not per-node
+# config, and nothing here identifies a cluster.
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  # DHCP at build time only. tofu/k3s assigns each node a static cluster-VLAN address
+  # through cloud-init at clone time, so the template must not carry one.
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "en*"
+        dhcp4: true
+  storage:
+    # Whole disk, no LVM. The nodes get a fixed-size boot disk resized by tofu,
+    # and LVM would add a layer with nothing to manage — Longhorn owns the data
+    # disk and formats it separately.
+    layout:
+      name: direct
+  identity:
+    hostname: ubuntu-2404-k3s-template
+    username: kube
+    # Build-time password hash. Deleted by the cleanup provisioner
+    # (`passwd -d kube`) before the VM becomes a template, and password auth is
+    # disabled by the hardening role. Generate a throwaway hash with
+    # `mkpasswd -m sha-512` and put it here before building; it must match the
+    # build-time ssh_password Packer uses.
+    password: "REPLACE_WITH_SHA512_HASH_FROM_MKPASSWD"
+  ssh:
+    install-server: true
+    allow-pw: true          # build only; hardening role sets this to no
+  packages:
+    - qemu-guest-agent
+    - open-iscsi
+    - nfs-common
+  late-commands:
+    # Passwordless sudo for `kube` — Ansible's become depends on it, and the
+    # existing nodes are configured the same way.
+    - echo 'kube ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/90-kube
+    - chmod 0440 /target/etc/sudoers.d/90-kube

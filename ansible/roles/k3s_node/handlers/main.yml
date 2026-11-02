@@ -1,0 +1,10 @@
+---
+- name: Reload multipathd for Longhorn blacklist
+  ansible.builtin.systemd_service:
+    name: multipathd.service
+    state: reloaded
+  # Reload only a running daemon. An absent/stopped daemon cannot claim new
+  # devices; it will read the persistent config if started in the future.
+  when: >-
+    ansible_facts.services.get('multipathd.service', {}).get('state', '')
+    == 'running'

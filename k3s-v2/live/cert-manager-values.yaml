@@ -1,0 +1,12 @@
+# cert-manager v1.18.2.
+# helm upgrade --install cert-manager jetstack/cert-manager --version v1.18.2 \
+#   -n cert-manager -f cert-manager-values.yaml
+crds:
+  enabled: true
+
+# CRITICAL for this lab's split DNS: the internal resolvers redirect ALL of
+# *.apps.example.com to NPM (198.51.100.40), so cert-manager's DNS-01 self-check would never
+# see the real _acme-challenge TXT record. Force it to query public recursive
+# nameservers directly, bypassing the redirect.
+dns01RecursiveNameserversOnly: true
+dns01RecursiveNameservers: "1.1.1.1:53,8.8.8.8:53"

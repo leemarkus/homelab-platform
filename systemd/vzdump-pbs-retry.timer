@@ -1,0 +1,14 @@
+[Unit]
+Description=Retry the 02:30 PBS backup window on this node at 04:30
+Documentation=https://github.com/leemarkus/homelab-platform/blob/main/scripts/vzdump-pbs-retry.sh
+
+[Timer]
+# The PBS job runs `2,22:30`. A 22:30 miss is retried by the 02:30 job 4h
+# later on its own; a 02:30 miss opens a 20h hole. 04:30 is after the 02:30
+# window completes (~29-35 min on this node) and well clear of 22:30.
+OnCalendar=*-*-* 04:30:00
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,24 @@
+# node-2 (and later node-3) — joining control-plane servers.
+# Applied at /etc/rancher/k3s/config.yaml, then:
+#   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.34.4+k3s1 sh -s - server
+# Token redacted (the real value is kept outside the repository). node-ip/zone per node.
+server: https://192.0.2.10:6443   # kube-vip API VIP (moved from .10 — see README)
+token: __TOKEN__
+tls-san:
+  - 192.0.2.10
+  - k3s.lab.example.com
+node-ip: 192.0.2.12              # node-3 -> 192.0.2.13
+disable:
+  - traefik
+  - servicelb
+  - local-storage
+flannel-backend: none
+disable-network-policy: true
+disable-kube-proxy: true
+secrets-encryption: true
+etcd-snapshot-schedule-cron: "0 3 * * *"
+etcd-snapshot-retention: 14
+node-taint:
+  - node-role.kubernetes.io/control-plane:NoSchedule
+node-label:
+  - topology.kubernetes.io/zone=pve-2   # node-3 -> zone=pve-3

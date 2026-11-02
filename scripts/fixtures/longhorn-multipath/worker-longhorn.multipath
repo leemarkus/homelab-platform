@@ -1,0 +1,8 @@
+mpatha (360000000000000000000000000000001) dm-0 IET,VIRTUAL-DISK
+size=10G features='0' hwhandler='0' wp=rw
+`-+- policy='service-time 0' prio=1 status=active
+  `- 2:0:0:1 sdc 8:32 active ready running
+mpathb (360000000000000000000000000000002) dm-1 IET,VIRTUAL-DISK
+size=5G features='0' hwhandler='0' wp=rw
+`-+- policy='service-time 0' prio=1 status=active
+  `- 3:0:0:1 sdd 8:48 active ready running

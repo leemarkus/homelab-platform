@@ -1,0 +1,72 @@
+---
+# Example inventory. Copy to hosts.yml (not committed) and replace the
+# documentation addresses (RFC 5737) with your own. Group and host names match
+# what the playbooks target.
+#
+#   198.51.100.0/24  LAN (Proxmox management, tier VMs, NAS, Pi)
+#   192.0.2.0/24     cluster VLAN (production k3s)
+#   203.0.113.0/24   sandbox VLAN (pre-production, cannot reach the cluster VLAN)
+all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    timezone: Etc/UTC
+
+  children:
+    proxmox:
+      vars:
+        ansible_user: root
+      hosts:
+        pve-1: { ansible_host: 198.51.100.11 }   # k3s host: node-1 + node-4
+        pve-2: { ansible_host: 192.0.2.5 }      # k3s host: node-2 + node-5 (the cluster VLAN only)
+        pve-3: { ansible_host: 198.51.100.13 }   # k3s host: node-3 + node-6, secondary PBS
+        pve-4: { ansible_host: 198.51.100.14 }   # storage: TrueNAS, PBS, tier VMs; NUT master
+        pve-5: { ansible_host: 203.0.113.15 }    # sandbox: pre-production node
+
+    # Single-purpose VMs outside the cluster (ADR 0006 function tiers).
+    tier_vms:
+      vars:
+        ansible_user: kube
+      hosts:
+        edge: { ansible_host: 198.51.100.40 }            # reverse proxy + tunnel
+        apps: { ansible_host: 198.51.100.41 }
+        observability: { ansible_host: 198.51.100.42 }
+
+    # Git server, deliberately off the cluster it rebuilds (ADR 0011).
+    forgejo:
+      hosts:
+        forgejo: { ansible_host: 198.51.100.45, ansible_user: kube }
+
+    pbs_servers:
+      vars:
+        ansible_user: root
+      hosts:
+        pbs: { ansible_host: 198.51.100.51 }    # primary, datastore on the NAS
+        pbs2: { ansible_host: 198.51.100.52 }   # pull-sync secondary on pve-3
+
+    raspberry_pi:
+      hosts:
+        rpi5: { ansible_host: 198.51.100.55, ansible_user: admin }
+
+    # Production k3s: one control plane + one worker per Proxmox host.
+    # k3s_zone is the physical host, so Longhorn spreads replicas across hosts.
+    k3s_v2:
+      vars:
+        ansible_user: kube
+      children:
+        k3s_v2_control:
+          hosts:
+            node-1: { ansible_host: 192.0.2.11, k3s_zone: pve-1, k3s_node_role: server-init }
+            node-2: { ansible_host: 192.0.2.12, k3s_zone: pve-2 }
+            node-3: { ansible_host: 192.0.2.13, k3s_zone: pve-3 }
+        k3s_v2_worker:
+          hosts:
+            node-4: { ansible_host: 192.0.2.21, k3s_zone: pve-1 }
+            node-5: { ansible_host: 192.0.2.22, k3s_zone: pve-2 }
+            node-6: { ansible_host: 192.0.2.23, k3s_zone: pve-3 }
+
+    # Disposable single-node pre-production cluster (tofu/preprod).
+    k3s_preprod:
+      vars:
+        ansible_user: kube
+      hosts:
+        preprod-1: { ansible_host: 203.0.113.20 }

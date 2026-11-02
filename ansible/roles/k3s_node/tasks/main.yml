@@ -1,0 +1,272 @@
+---
+# Install and configure k3s from inventory. Idempotent: re-running on a healthy
+# node renders the same config and does not reinstall.
+#
+# ORDER MATTERS. The config file is written BEFORE the installer runs, because
+# k3s reads /etc/rancher/k3s/config.yaml at first start; writing it afterwards
+# means the first boot uses defaults (flannel up, kube-proxy up, traefik
+# deployed) and you get a node that has to be torn down rather than fixed.
+
+- name: Fail fast if the join token was not supplied
+  # No default, and deliberately not in git. Pass it at run time:
+  #   ansible-playbook ... -e "k3s_token=$(op read ...)"
+  # or from a vars file kept outside the repository. A role that invented a token would build a
+  # node that cannot join, and would look like it worked.
+  assert:
+    that:
+      - k3s_token is defined
+      - k3s_token | length > 16
+    fail_msg: >-
+      k3s_token is unset or implausibly short. Pass it at run time from
+      your password manager; it must never be committed.
+    quiet: true
+
+- name: Fail fast if etcd-s3 is enabled but its credentials were not supplied
+  # The whole point of rendering etcd-s3 into the template is that the
+  # role stops silently deleting it — so a run that cannot supply the keys must
+  # ABORT, not fall back to writing the block out without them (which would be
+  # the same data loss by a different route) and not fall back to omitting it.
+  when: k3s_node_role in ['server-init', 'server'] and k3s_etcd_s3 | bool
+  assert:
+    that:
+      - k3s_etcd_s3_access_key is defined
+      - k3s_etcd_s3_access_key | length > 0
+      - k3s_etcd_s3_secret_key is defined
+      - k3s_etcd_s3_secret_key | length > 0
+    fail_msg: >-
+      k3s_etcd_s3 is true but k3s_etcd_s3_access_key / k3s_etcd_s3_secret_key are
+      unset. Pass them at run time from your password manager (the object-store
+      credentials). Refusing to rewrite config.yaml without them —
+      that would disable off-cluster etcd snapshots silently. To deliberately
+      build a node with no S3 upload, pass -e k3s_etcd_s3=false.
+    quiet: true
+
+- name: Fail fast if the zone label is missing
+  # An unset zone does not error — it silently drops the node-label, and
+  # Longhorn's 3 replicas then have no topology to spread across. Silent is
+  # worse than broken here.
+  assert:
+    that:
+      - k3s_zone | length > 0
+    fail_msg: "k3s_zone is empty for {{ inventory_hostname }} — set it in host_vars."
+    quiet: true
+
+- name: Protect Longhorn devices before k3s can attach volumes
+  ansible.builtin.import_tasks: multipath.yml
+  when: k3s_longhorn_multipath_manage | bool
+  tags: [longhorn-multipath]
+
+- name: Ensure k3s config directory exists
+  file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+# --- Longhorn data disk ------------------------------------------------------
+# ORDER MATTERS: this runs BEFORE k3s is configured or installed, and that is
+# not tidiness. Longhorn's engine-image DaemonSet copies its engine binary onto
+# the host at /var/lib/longhorn/engine-binaries/. If the node joins the cluster
+# before this disk is mounted, that copy lands on the ROOT filesystem and the
+# later mount SHADOWS it. Longhorn then fails every replica with
+#   exec: "/host/var/lib/longhorn/engine-binaries/.../longhorn": no such file
+# while the file is plainly there — under the mount point, invisible.
+# Observed on node-4's rebuild, 2026-07-28: 8 volumes stuck degraded for
+# ~40 minutes with the binary sitting one `umount` away the whole time.
+# THIS WAS THE THIRD WAY "any node is rebuildable from code" WAS FALSE, and the
+# only one that no amount of reading would have found — it took actually
+# destroying node-4 on 2026-07-28 to see it.
+#
+# The original workers had /dev/sdb formatted and mounted by hand during the
+# 2026-07-04 build. nodes.tf even says "ansible mounts it at /var/lib/longhorn".
+# Ansible did not. Nothing in this role ever touched the disk.
+#
+# The failure mode is silent, which is what makes it worth this much comment: a
+# rebuilt worker joins Ready, runs Cilium, schedules pods, and passes every
+# check anyone would think to run — while Longhorn has nowhere to put a replica
+# on it. The cluster simply stays at 2 of 3 replicas indefinitely, degraded but
+# serving, with no event and no alert. You would find out during the next node
+# failure, which is the worst possible time to learn your redundancy is gone.
+- name: Provision the Longhorn data disk
+  when: k3s_longhorn_disk | bool
+  block:
+    - name: Read the data disk's current filesystem
+      command: "lsblk -no FSTYPE {{ k3s_longhorn_device }}"
+      register: k3s_longhorn_fstype
+      changed_when: false
+      # Must run under --check too. It is read-only, and without this the
+      # module is skipped in check mode, leaving `stdout` undefined — so the
+      # mkfs guard below evaluates against nothing and the play dies with
+      # "object has no element 0". Found by running --check against node-5 and
+      # node-6, which hold live replicas: a safety guard that cannot be
+      # dry-run is a safety guard nobody will dry-run.
+      check_mode: false
+
+    - name: Create a filesystem ONLY on a genuinely blank disk
+      # The `when` is a data-safety guard, not an optimisation. This device
+      # holds Longhorn replicas on every existing worker; an unconditional
+      # mkfs re-run against the fleet would destroy all of them at once, and
+      # Longhorn's 3-replica redundancy would not save you because the play
+      # would hit all three nodes in the same run.
+      filesystem:
+        fstype: ext4
+        dev: "{{ k3s_longhorn_device }}"
+      when: k3s_longhorn_fstype.stdout | trim | length == 0
+
+    - name: Refuse to mount a disk that already holds something else
+      # If it came back as anything other than ext4 or blank, this is not the
+      # disk we think it is. Stop rather than mount it somewhere load-bearing.
+      assert:
+        that: k3s_longhorn_fstype.stdout | trim in ['', 'ext4']
+        fail_msg: >-
+          {{ k3s_longhorn_device }} on {{ inventory_hostname }} has filesystem
+          '{{ k3s_longhorn_fstype.stdout | trim }}', not ext4. Refusing to
+          mount it at {{ k3s_longhorn_path }} — check that scsi1 is the disk
+          you think it is before going further.
+        quiet: true
+
+    - name: Mount it and record it in fstab
+      # Device path rather than UUID, matching node-5/node-6 which were built
+      # by hand. scsi0/scsi1 are fixed in tofu, so sdb is deterministic here.
+      # Worth revisiting together with the existing nodes, not unilaterally —
+      # two conventions across one fleet is worse than either one.
+      mount:
+        path: "{{ k3s_longhorn_path }}"
+        src: "{{ k3s_longhorn_device }}"
+        fstype: ext4
+        opts: defaults
+        state: mounted
+
+    - name: Confirm it is actually mounted
+      # The point of the block. A fstab line that never mounted is precisely
+      # the silent half-success this whole section exists to prevent.
+      command: "findmnt -no SOURCE {{ k3s_longhorn_path }}"
+      register: k3s_longhorn_mounted
+      changed_when: false
+      failed_when: k3s_longhorn_device not in k3s_longhorn_mounted.stdout
+
+# --- Registry host entry -----------------------------------------------------
+# THIS WAS NEVER IN ANY REPO until the role took it over; the entry was first
+# added by hand. The cost showed up on 2026-07-28: the rebuilt
+# node-4 came back with no entry at all, so it could not pull from the OCI
+# registry by name — invisible until something tried to schedule there.
+#
+# It must go in the cloud-init TEMPLATE as well as /etc/hosts. The NoCloud seed
+# sets `manage_etc_hosts: true`, so cloud-init re-renders /etc/hosts on every
+# boot and silently drops anything written only there. That cannot be disabled
+# from /etc/cloud — user-data outranks cloud.cfg.d.
+- name: Pin the Forgejo/registry host in /etc/hosts and the cloud-init template
+  lineinfile:
+    path: "{{ item }}"
+    regexp: '\s{{ k3s_forgejo_host | regex_escape }}$'
+    line: "{{ k3s_forgejo_ip }} {{ k3s_forgejo_host }}"
+    owner: root
+    group: root
+    mode: "0644"
+    create: false
+  loop:
+    - /etc/hosts
+    - /etc/cloud/templates/hosts.debian.tmpl
+  # The template is absent on a node not built from the NoCloud seed; /etc/hosts
+  # always exists. Failing the whole play over the optional one would be wrong.
+  failed_when: false
+
+
+# --- kube-apiserver audit policy (servers only) ------------------------------
+# ORDER MATTERS, again, and this one is load-bearing: config.yaml below passes
+# `audit-policy-file=<path>` to kube-apiserver, and an apiserver pointed at a
+# MISSING policy file REFUSES TO START. Writing the policy after the config
+# would mean the restart at the bottom of this role takes the control plane down
+# and it does not come back. It must exist first.
+#
+# before this task the cluster had `audit-log-path` set, a real file at
+# that path, and zero bytes in it for a month — because kube-apiserver's default
+# policy records nothing. The log path was never the missing piece; the policy
+# was.
+- name: Install the kube-apiserver audit policy
+  when: k3s_node_role in ['server-init', 'server']
+  template:
+    src: audit-policy.yaml.j2
+    dest: "{{ k3s_audit_policy_path }}"
+    owner: root
+    group: root
+    # World-readable is fine and deliberate — the policy says what is recorded,
+    # it contains no recorded data. The audit LOG itself stays root-only.
+    mode: "0644"
+  register: k3s_audit_policy
+
+- name: Render /etc/rancher/k3s/config.yaml
+  template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    # 0600: the file contains the cluster join token.
+    mode: "0600"
+  register: k3s_config
+
+- name: Check whether k3s is already installed
+  command: k3s --version
+  register: k3s_installed
+  changed_when: false
+  failed_when: false
+  # Read-only, so run it under --check as well. Without this the module is
+  # skipped in check mode, `stdout_lines` comes back empty, and the very next
+  # task dies on `stdout_lines[0]` — meaning this playbook could never be
+  # dry-run against a node that already had k3s. Pre-existing; surfaced
+  # 2026-07-28 while dry-running the new Longhorn-disk guard against the two
+  # workers that hold live replicas, which is exactly when you most want a
+  # dry run to work.
+  check_mode: false
+
+- name: Report detected k3s version
+  debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ 'k3s not installed' if k3s_installed.rc != 0
+      else k3s_installed.stdout_lines[0] }}
+
+- name: Install k3s at the pinned version
+  when: k3s_installed.rc != 0 or k3s_version not in k3s_installed.stdout
+  block:
+    - name: Download the k3s installer
+      get_url:
+        url: "{{ k3s_install_url }}"
+        dest: /tmp/k3s-install.sh
+        mode: "0700"
+
+    - name: Run the installer
+      # INSTALL_K3S_SKIP_START=false is the default; the installer starts the
+      # service, which then reads the config rendered above.
+      command: /tmp/k3s-install.sh {{ 'server' if k3s_node_role in ['server-init', 'server'] else 'agent' }}
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+      args:
+        creates: "{{ '/usr/local/bin/k3s' if k3s_installed.rc != 0 else omit }}"
+      register: k3s_install_run
+
+    - name: Remove the installer
+      file:
+        path: /tmp/k3s-install.sh
+        state: absent
+
+- name: Restart k3s if the config changed on an already-installed node
+  when:
+    # The audit policy is in this condition on purpose. It is read by
+    # kube-apiserver only at startup, so a policy edit that does not also touch
+    # config.yaml would otherwise sit on disk doing nothing until the next
+    # unrelated restart — a change that looks applied and is not, which is the
+    # exact class of bug was.
+    - k3s_config.changed or (k3s_audit_policy is defined and k3s_audit_policy.changed)
+    - k3s_installed.rc == 0
+    - k3s_install_run is not defined or not k3s_install_run.changed
+  systemd:
+    name: "{{ 'k3s' if k3s_node_role in ['server-init', 'server'] else 'k3s-agent' }}"
+    state: restarted
+  # A control-plane restart briefly drops one etcd member. Safe with a 3-node
+  # quorum, and this only triggers on a real config change.
+
+- name: Wait for the node's kubelet port to answer
+  wait_for:
+    port: 10250
+    host: "{{ ansible_host }}"
+    timeout: 180

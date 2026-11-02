@@ -1,0 +1,109 @@
+---
+- name: Skip unless this role is the intended owner of Cilium here
+  # Production's Cilium is a hand-installed Helm release. Letting this role
+  # loose there would put two managers on one component — the failure mode is
+  # not a clean error, it is a silent fight over the daemonset during an
+  # unrelated playbook run.
+  meta: end_host
+  when: not (cilium_manage | bool)
+
+- name: Only a server node can place auto-deploy manifests
+  # /var/lib/rancher/k3s/server/manifests exists only on servers; on an agent
+  # this would create a directory k3s never reads and report success.
+  assert:
+    that:
+      - k3s_node_role in ['server-init', 'server']
+    fail_msg: >-
+      cilium_manage is true for {{ inventory_hostname }} but its role is
+      '{{ k3s_node_role }}'. The CNI manifest belongs on a server node.
+    quiet: true
+
+- name: Look for a Cilium that this role did not install
+  # Cheap insurance against pointing cilium_manage at an existing cluster.
+  command: k3s kubectl -n kube-system get daemonset cilium -o name
+  register: cilium_existing
+  changed_when: false
+  failed_when: false
+
+- name: Check whether our manifest is already in place
+  stat:
+    path: /var/lib/rancher/k3s/server/manifests/cilium.yaml
+  register: cilium_manifest
+
+- name: Refuse to adopt a Cilium installed by something else
+  fail:
+    msg: >-
+      A Cilium daemonset already exists on {{ inventory_hostname }} but this
+      role's manifest is absent, so it was installed by other means (on this
+      lab, the hand-run helm install in k3s-v2/04-cluster-build.md).
+      Adopting it is a migration, not a playbook run — do it deliberately with
+      `-e cilium_adopt=true`, having first proven the values match with
+      scripts/verify-cilium-values.sh, or set cilium_manage: false for this
+      host. See docs/runbooks/cilium-adoption.md.
+  when:
+    - cilium_existing.rc == 0
+    - not cilium_manifest.stat.exists
+    - not (cilium_adopt | bool)
+
+- name: Announce the adoption, so it is never mistaken for a routine run
+  # k3s's helm-controller runs `helm upgrade --install cilium`, which takes over
+  # the existing release rather than colliding with it. Helm does NOT merge with
+  # what is deployed — the values rendered below become the release outright, so
+  # any key this role omits is removed from the running CNI. That is why the
+  # values check is a precondition and not a nicety.
+  debug:
+    msg: >-
+      ADOPTING the existing Cilium release on {{ inventory_hostname }}.
+      Expected outcome: helm release goes to revision 2 with an UNCHANGED
+      daemonset generation and no pod restart. If the daemonset rolls, the
+      rendered values differ from the live release — stop and re-run
+      scripts/verify-cilium-values.sh.
+  when:
+    - cilium_existing.rc == 0
+    - not cilium_manifest.stat.exists
+    - cilium_adopt | bool
+
+- name: Install the Cilium HelmChart manifest
+  template:
+    src: cilium-helmchart.yaml.j2
+    dest: /var/lib/rancher/k3s/server/manifests/cilium.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  register: cilium_placed
+
+- name: Wait for the Cilium daemonset to exist
+  # k3s's helm controller runs the install as a Job; the daemonset appears only
+  # after the chart is pulled, so this cannot be folded into the readiness wait.
+  command: k3s kubectl -n kube-system get daemonset cilium -o name
+  register: cilium_ds
+  until: cilium_ds.rc == 0
+  retries: "{{ ((cilium_wait_timeout | int) / 10) | int }}"
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Fail clearly if the chart never installed
+  fail:
+    msg: >-
+      Cilium's daemonset did not appear within {{ cilium_wait_timeout }}s.
+      Check the install pod first — `k3s kubectl -n kube-system get pods | grep
+      helm-install-cilium`. If it is **Pending on an untolerated taint**, the
+      HelmChart lost `bootstrap: true` and has deadlocked against the
+      not-ready taint of the node it is meant to make ready. If it Ran and
+      failed, read its logs; that is where a bad values block or no route to
+      helm.cilium.io shows up.
+  when: cilium_ds.rc != 0
+
+- name: Wait for the node to reach Ready
+  # The point of the role. Readiness is the observable outcome; a running
+  # daemonset that has not flipped the node condition is not success.
+  command: k3s kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout={{ cilium_wait_timeout }}s
+  register: cilium_ready
+  changed_when: false
+
+- name: Report
+  debug:
+    msg: >-
+      Cilium {{ cilium_version }} active on {{ inventory_hostname }};
+      node Ready, API endpoint {{ cilium_k8s_service_host }}:{{ cilium_k8s_service_port }}.

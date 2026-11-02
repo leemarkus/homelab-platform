@@ -1,0 +1,28 @@
+# ArgoCD — GitOps controller. NPM terminates TLS, so run the server insecure
+# (plain HTTP) behind ingress-nginx.
+# helm install argocd argo/argo-cd --version 8.1.2 -n argocd --create-namespace \
+#   -f argocd-values.yaml
+global:
+  domain: argocd.apps.example.com
+
+configs:
+  params:
+    server.insecure: true # TLS terminated at NPM
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hostname: argocd.apps.example.com
+    # single replica is fine for a homelab controller
+  # small cluster: one of each
+  replicas: 1
+
+repoServer:
+  replicas: 1
+applicationSet:
+  replicas: 1
+
+# Dex/SSO not configured yet (admin password only) — OIDC is a backlog item.
+dex:
+  enabled: false

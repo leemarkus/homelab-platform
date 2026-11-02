@@ -1,0 +1,45 @@
+---
+# Pre-prod single-node k3s. Everything here exists to keep this node from
+# behaving like — or reaching — production.
+
+# One node, so it bootstraps its own etcd and there is nothing to join.
+k3s_node_role: server-init
+
+# NOT the production VIP. There is no kube-vip here; the node's own address is
+# the API endpoint. Pointing this at 192.0.2.10 would make preprod try to talk
+# to the real control plane.
+k3s_api_vip: 203.0.113.20
+k3s_tls_sans:
+  - 203.0.113.20
+
+# Untainted: with one node, tainting the control plane means nothing schedules
+# and every test hangs in Pending.
+k3s_taint_control_plane: false
+
+# Single zone. Longhorn will run 1 replica here — that is the accepted limit of
+# a one-node pre-prod, recorded in tofu/preprod/main.tf. It tests charts, CRDs,
+# conversion webhooks and upgrade paths, NOT replica rebuild or node failure.
+k3s_zone: preprod
+
+# No off-cluster etcd upload. This cluster is disposable by design; backing it
+# up would imply it holds something worth keeping.
+k3s_etcd_snapshot_retention: 3
+
+# --- CNI (added 2026-07-27) ---
+# This node is the one place the `cilium` role owns the CNI. Production's Cilium
+# is a hand-installed Helm release and adopting it is a separate migration, so
+# `cilium_manage` stays false everywhere else (see roles/cilium/defaults).
+cilium_manage: true
+
+# No kube-vip here, so Cilium talks to this node's own API. Pointing it at
+# 192.0.2.10 would send preprod looking for the production control plane —
+# the same class of mistake k3s_api_vip above exists to prevent.
+cilium_k8s_service_host: 203.0.113.20
+
+# One node: production's 2 operator replicas would leave the second Pending
+# forever on anti-affinity, and every future upgrade test would open with a
+# pod that looks broken and is not.
+cilium_operator_replicas: 1
+
+# this group runs Longhorn and needs its iSCSI devices excluded.
+k3s_longhorn_multipath_manage: true

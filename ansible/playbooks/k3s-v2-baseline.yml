@@ -1,0 +1,119 @@
+---
+# Baseline prep for k3s v2 nodes (ADR 0008). Idempotent; safe to re-run.
+# Run: ansible-playbook -i inventory/hosts.yml playbooks/k3s-v2-baseline.yml
+- name: k3s v2 node baseline
+  # `k3s_preprod` added 2026-07-27. It was missed when the pre-prod node was
+  # introduced: `k3s-node.yml` was updated to `k3s_v2:k3s_preprod` but this
+  # playbook was not, so `--limit preprod-1` matched nothing and exited 0 with
+  # "skipping: no hosts matched" — a green run that did nothing, which is the
+  # worst shape for a prerequisite step. This playbook is a separate link in
+  # the chain (see k3s-node.yml's header): it owns iscsid, swap and the kernel
+  # modules, none of which the k3s_node role does.
+  hosts: k3s_v2:k3s_preprod
+  become: true
+  vars:
+    longhorn_disk: /dev/sdb
+    longhorn_path: /var/lib/longhorn
+  tasks:
+    - name: Install required packages (Longhorn + guest agent + iscsi/nfs)
+      apt:
+        name:
+          - qemu-guest-agent
+          - open-iscsi
+          - nfs-common
+          - util-linux # provides iscsiadm deps / findmnt
+        state: present
+        update_cache: true
+
+    - name: Enable iscsid and guest agent
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - iscsid
+        - qemu-guest-agent
+
+    - name: Disable swap now
+      command: swapoff -a
+      changed_when: false
+
+    - name: Remove swap entries from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*[^#].*\sswap\s'
+        state: absent
+
+    - name: Load kernel modules for k3s/Cilium
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist kernel modules
+      copy:
+        dest: /etc/modules-load.d/k3s.conf
+        content: "overlay\nbr_netfilter\n"
+        mode: "0644"
+
+    - name: Kernel sysctls for k3s/Cilium
+      copy:
+        dest: /etc/sysctl.d/99-k3s.conf
+        mode: "0644"
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+          fs.inotify.max_user_instances       = 8192
+          fs.inotify.max_user_watches         = 524288
+
+    - name: Apply sysctls immediately
+      command: sysctl --system
+      changed_when: false
+
+# --- Worker-only: dedicated Longhorn disk ---
+- name: Prepare Longhorn data disk on workers
+  # preprod-1 is a single node playing both roles, and tofu/preprod gives it the
+  # same second 60G disk (scsi1 → /dev/sdb) — so it needs this play too, not
+  # just the baseline above. Verified present and unformatted before this
+  # pattern was widened; `force: false` below means an already-formatted disk
+  # is never reformatted.
+  hosts: k3s_v2_worker:k3s_preprod
+  become: true
+  vars:
+    longhorn_disk: /dev/sdb
+    longhorn_path: /var/lib/longhorn
+  tasks:
+    - name: Protect Longhorn devices on workers and preprod
+      ansible.builtin.import_role:
+        name: k3s_node
+        tasks_from: multipath
+      when: k3s_longhorn_multipath_manage | bool
+      tags: [longhorn-multipath]
+
+    - name: Check the Longhorn disk exists
+      stat:
+        path: "{{ longhorn_disk }}"
+      register: lh_disk
+
+    - name: Fail early if the data disk is missing
+      fail:
+        msg: "{{ longhorn_disk }} not found — check the tofu data_disk for this worker"
+      when: not lh_disk.stat.exists
+
+    - name: Create ext4 filesystem on the Longhorn disk (only if empty)
+      community.general.filesystem:
+        fstype: ext4
+        dev: "{{ longhorn_disk }}"
+        # never reformat a disk that already has a filesystem
+        force: false
+
+    - name: Mount the Longhorn disk at {{ longhorn_path }}
+      ansible.posix.mount:
+        path: "{{ longhorn_path }}"
+        src: "{{ longhorn_disk }}"
+        fstype: ext4
+        opts: defaults
+        state: mounted

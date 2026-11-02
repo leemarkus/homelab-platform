@@ -1,0 +1,23 @@
+# Longhorn — distributed block storage on the worker Longhorn disks (/dev/sdb).
+# helm install longhorn longhorn/longhorn --version 1.9.0 -n longhorn-system \
+#   --create-namespace -f longhorn-values.yaml
+#
+# 3 workers across 3 zones (pve-1/pve-2/pve-3) as of 2026-07-06 → ADR 0008's
+# 3-replica default (one replica per physical host).
+defaultSettings:
+  defaultDataPath: /var/lib/longhorn
+  defaultReplicaCount: 3
+  # hard zone anti-affinity — a volume's 3 replicas must span all 3 zones,
+  # so any one physical host loss never takes more than one replica.
+  replicaZoneSoftAntiAffinity: false
+  replicaSoftAntiAffinity: false
+  # Control planes are tainted; Longhorn only runs on workers anyway.
+  createDefaultDiskLabeledNodes: false
+
+persistence:
+  defaultClass: true
+  defaultClassReplicaCount: 3
+
+# Longhorn UI exposed later via ingress + NPM (like the other services).
+longhornUI:
+  replicas: 1

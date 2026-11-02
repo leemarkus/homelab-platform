@@ -1,0 +1,25 @@
+---
+# inventory has no SAN/iSCSI boot; tofu/k3s/nodes.tf uses scsi0/scsi1
+# VM disks. Match Longhorn's IET/VIRTUAL-DISK identity, never sd*: the OS is
+# also sda. This follows the Longhorn KB blacklist approach without masking
+# the daemon or excluding unrelated storage. Preserve existing site policy.
+- name: Read service state without installing or starting multipathd
+  ansible.builtin.service_facts:
+
+- name: Manage the Longhorn blacklist template in /etc/multipath.conf
+  ansible.builtin.blockinfile:
+    path: /etc/multipath.conf
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    marker: "# {mark} ANSIBLE LONGHORN"
+    block: "{{ lookup('ansible.builtin.template', 'multipath.conf.j2') }}"
+    state: "{{ k3s_longhorn_multipath_state }}"
+  notify: Reload multipathd for Longhorn blacklist
+
+# On reprovision the blacklist must take effect before k3s starts attaching
+# volumes, not just at the end of the play. No notification on an unchanged run.
+- name: Apply the blacklist before continuing node provisioning
+  ansible.builtin.meta: flush_handlers

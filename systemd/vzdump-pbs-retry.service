@@ -1,0 +1,15 @@
+[Unit]
+Description=Retry the PBS backup window if it did not land
+Documentation=https://github.com/leemarkus/homelab-platform/blob/main/scripts/vzdump-pbs-retry.sh
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vzdump-pbs-retry.sh
+# A backup of the in-scope guests takes ~35 min; allow generous headroom but
+# never let a stuck run bleed into the 22:30 window.
+TimeoutStartSec=5h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Cilium's version pin lives in THIS repo, not gitops, because Cilium is",
+    "deliberately not an ArgoCD Application — ArgoCD cannot install the network",
+    "it needs in order to run, so k3s's HelmChart controller owns it (see",
+    "docs/runbooks/cilium-adoption.md). That closed the ownership gap and left",
+    "an upgrade-path gap: Renovate's `argocd` manager reads chart pins out of",
+    "ArgoCD Application manifests, and there is no such manifest to read.",
+    "",
+    "So Renovate is pointed at this repo too. It still RUNS from the gitops",
+    "repository's CI (a manually dispatched workflow), because this repo has no",
+    "CI of its own, and standing up a runner here to bump one line would be a new",
+    "moving part bought for nothing. RENOVATE_REPOSITORIES lists both repos.",
+    "",
+    "DELIBERATELY NARROW. The private repo holds ~40 docker-compose files with pinned",
+    "image tags. An unscoped Renovate would open dozens of PRs against services",
+    "that have no test, no staging and no rollback story, on a repo with no CI to",
+    "validate any of it — noise that would get the whole thing muted within a",
+    "week. enabledManagers is therefore the custom manager ONLY. Widening this is",
+    "a deliberate decision that should come with somewhere for those PRs to be",
+    "validated, not a default.",
+    "",
+    "MANAGERS: Only the regex manager below. Nothing else in this repo is under Renovate's control."
+  ],
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "baseBranches": [
+    "main"
+  ],
+  "enabledManagers": [
+    "custom.regex"
+  ],
+  "customManagers": [
+    {
+      "description": "roles/cilium/defaults/main.yml: cilium_version: \"1.17.5\". This is the pin the HelmChart manifest renders, so bumping it here and running the role is the entire upgrade — helm-controller performs a `helm upgrade` on the adopted release.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^ansible/roles/cilium/defaults/main\\.yml$/"
+      ],
+      "matchStrings": [
+        "cilium_version:\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "cilium",
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "https://helm.cilium.io"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Never grouped, never automerged, and the PR body says what the reviewer is actually deciding. This is the CNI: a bad bump takes pod networking for the whole cluster, and the failure is quiet — existing pods keep working while new ones cannot schedule. One minor per PR (separateMultipleMinor, approved 2026-09-25): Cilium supports upgrades only minor-to-next-minor, and the default proposed 1.17->1.20 in one step (#4, closed) — each minor runs through the ansible role on its own.",
+      "matchPackageNames": [
+        "cilium"
+      ],
+      "groupName": null,
+      "automerge": false,
+      "prPriority": 10,
+      "prBodyNotes": [
+        ":warning: **This is the CNI.** Nothing in CI proves a Cilium bump works — this repo has no CI, and rendering is not running.",
+        "",
+        "Before merging: read the upstream upgrade notes for CRD and datapath changes, then **test on `preprod-1` first** (`cilium_manage` is already true there). The adoption runbook's phase-2 method applies unchanged — record daemonset generation, pod identity and `cilium-config` before and after, and keep a real traffic probe running across it.",
+        "",
+        "Merging this PR changes nothing on its own. The upgrade happens when the `cilium` role next runs and k3s's helm-controller performs the `helm upgrade`. Unlike a chart bump in gitops, there is no ArgoCD to apply it for you."
+      ],
+      "separateMultipleMinor": true
+    },
+    {
+      "description": "A Cilium major is a datapath migration, not a version bump. Dashboard approval means it cannot even open as a PR without a human asking for it.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security"
+    ]
+  },
+  "dependencyDashboardTitle": "Renovate — homelab node-layer pins"
+}

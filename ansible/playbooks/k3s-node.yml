@@ -1,0 +1,57 @@
+---
+# Build a k3s node from nothing but code. This is the playbook that meets the
+# rebuild goal "any node rebuildable from code".
+#
+#   ansible-playbook -i inventory/hosts.yml playbooks/k3s-node.yml \
+#     --limit preprod-1 -e "k3s_token=$K3S_TOKEN"
+#
+# The chain, and what owns each link:
+#   packer/ubuntu-2404-k3s.pkr.hcl  golden image (packages, no per-node state)
+#   tofu/k3s/                       VM: CPU, RAM, disks, VLAN, static IP
+#   k3s-v2-baseline.yml             OS prep: iscsid, swap off, kernel modules
+#   role k3s_node                   /etc/rancher/k3s/config.yaml + k3s install
+#   role hardening                  sshd, sysctl, security patches
+#
+# ALWAYS PASS --limit. Without it this targets every node in k3s_v2, and a config
+# change would roll all three control planes. There is no confirmation prompt.
+#
+# The token is never in git. Pass it with -e from a file kept outside git or a
+# password manager; the k3s_node role asserts it is present and plausible and fails
+# before touching the node if not.
+- name: Build a k3s v2 node end to end
+  # Both the production cluster and the disposable pre-prod node. --limit is what
+  # separates them, which is why the note above insists on it.
+  hosts: k3s_v2:k3s_preprod
+  become: true
+  # One at a time. A batch that reconfigured two of three control planes
+  # simultaneously would break etcd quorum — the exact failure the node-IaC work
+  # is supposed to make safe rather than introduce.
+  serial: 1
+  # Stop the whole run on the first failure rather than marching on to the next
+  # control plane with a broken change.
+  any_errors_fatal: true
+
+  pre_tasks:
+    - name: Show what this run will touch
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}) role={{ k3s_node_role }}
+          zone={{ k3s_zone | default('UNSET') }} k3s={{ k3s_version }}
+
+  roles:
+    - role: hardening
+      # Hardening first: it only touches sshd/sysctl/apt, and doing it before
+      # k3s means a node that fails hardening never becomes a cluster member.
+      tags: [hardening]
+    - role: k3s_node
+      tags: [k3s]
+    - role: cilium
+      # Last, and no-ops unless `cilium_manage` is true for the host (today:
+      # k3s_preprod only). Added 2026-07-27 — without it this playbook's own
+      # claim to "meet the rebuild goal: any node rebuildable from code" was
+      # false. The k3s_node role above writes `flannel-backend: none`
+      # + `disable-kube-proxy: true`, so the node it produces is NotReady with
+      # no pod networking until a CNI arrives, and the CNI was a hand-run helm
+      # command owned by no code. preprod-1 found this the first time the chain
+      # was ever run end to end.
+      tags: [cilium, cni]

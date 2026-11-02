@@ -1,0 +1,25 @@
+.DS_Store
+*.env
+!*.env.example
+
+# Real inventory (the repository ships inventory/hosts.example.yml).
+ansible/inventory/hosts.yml
+ansible/inventory/host_vars/
+
+# Packer: credentials and per-host inputs.
+packer/*.auto.pkrvars.hcl
+packer/host-*.pkrvars.hcl
+packer_cache/
+.packer.d/
+
+# OpenTofu: state, credentials, plans. State may contain secrets.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.auto.tfvars
+terraform.tfvars
+override.tf
+override.tf.json
+tfplan*
+crash.log

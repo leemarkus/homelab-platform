@@ -1,0 +1,136 @@
+---
+# k3s_node role defaults.
+#
+# This role owns /etc/rancher/k3s/config.yaml and the k3s install itself. Before
+# it existed, that config lived as three hand-maintained files in
+# `k3s-v2/live/server-init.yaml`, `server-join.yaml` and `agent.yaml`, copied
+# onto nodes by hand — which is why "any node rebuildable from code" was the one
+# rebuild goal still unmet. Those three files are the input to this
+# template; they stay as reference for what the live cluster was built with.
+#
+# NOTHING SECRET BELONGS IN THIS FILE. `k3s_token` has no default on purpose —
+# see tasks/main.yml, which fails closed if it is unset. The real token lives in
+# a password manager outside the repository and is passed at run time.
+
+# Pinned deliberately. An unpinned k3s install means a node rebuilt next month
+# rejoins on a different minor than its peers, which is exactly the drift this
+# role exists to prevent. This is the version a rebuild installs; it matched
+# all six production nodes when they were last recorded (2026-10-02).
+k3s_version: v1.34.9+k3s1
+
+# server-init | server | agent
+#   server-init : the one node that bootstraps etcd (cluster-init: true)
+#   server      : additional control-plane nodes, join via the VIP
+#   agent       : workers
+# Set per group in inventory/group_vars, never guessed here.
+k3s_node_role: agent
+
+# API endpoint: the kube-vip VIP (ARP mode) shared by the control-plane nodes.
+k3s_api_vip: 192.0.2.10
+k3s_tls_sans:
+  - 192.0.2.10
+  - k3s.lab.example.com
+
+# Components k3s ships that this cluster replaces. traefik -> ingress-nginx,
+# servicelb -> Cilium LB-IPAM, local-storage -> Longhorn.
+k3s_disable:
+  - traefik
+  - servicelb
+  - local-storage
+
+# Cilium provides CNI, NetworkPolicy and kube-proxy replacement.
+#
+# GOTCHA, and it costs an outage to rediscover: `disable-kube-proxy` is a
+# SERVER-ONLY flag. Setting it on an agent makes k3s-agent exit fatally on
+# k3s v1.34.x (recorded in k3s-v2/live/agent.yaml). The template below therefore
+# emits the Cilium flags only for server roles — do not "simplify" that.
+k3s_flannel_backend: none
+k3s_disable_network_policy: true
+k3s_disable_kube_proxy: true
+
+k3s_secrets_encryption: true
+
+# etcd snapshots: local schedule plus off-cluster upload. Servers only.
+k3s_etcd_snapshot_cron: "0 3 * * *"
+k3s_etcd_snapshot_retention: 14
+
+# Expose etcd's own metrics on :2381 (servers only). Applied to the live control
+# planes 2026-08-05; kept here so a rebuilt node does not come back unobservable
+# (— without this, etcd_disk_wal_fsync_duration_seconds does not exist).
+k3s_etcd_expose_metrics: true
+
+# etcd-s3: OFF-CLUSTER etcd snapshot upload (MinIO on TrueNAS).
+#
+# ⚠️ ADDED 2026-08-05 BECAUSE ITS ABSENCE WAS A DATA-LOSS LANDMINE.
+# The live control planes carried a 7-line `etcd-s3` block that this template did
+# not render. Running this role would therefore have rewritten config.yaml
+# WITHOUT it and silently disabled off-cluster etcd backups — the role would
+# report `changed` and look perfectly healthy. Layer 3 of the four-layer backup
+# posture would have been gone until someone needed it.
+#
+# The lesson generalises and is worth applying elsewhere: a template that owns a
+# whole file must render everything that file legitimately contains, or it is a
+# deletion tool wearing a configuration-management costume. Diff the rendered
+# output against a live node before trusting any such role.
+k3s_etcd_s3: true
+k3s_etcd_s3_endpoint: s3.example.com
+k3s_etcd_s3_insecure: true       # MinIO on the LAN, plain HTTP — no TLS on :9000
+k3s_etcd_s3_bucket: lab-backups
+k3s_etcd_s3_folder: etcd
+# k3s_etcd_s3_access_key / k3s_etcd_s3_secret_key have NO DEFAULTS on purpose,
+# exactly like k3s_token above. tasks/main.yml fails closed if they are missing
+# while k3s_etcd_s3 is true, so the failure mode is a loud abort rather than a
+# node that quietly stops backing up. Pass them at run time from outside the repository.
+
+# Zone label for topology spread — one control+worker pair per physical host, so
+# Longhorn's 3 replicas land on 3 different machines. Must be set per host;
+# an unset zone silently collapses the spread onto one host.
+k3s_zone: ""
+
+# Where the audit policy lands. kube-apiserver reads it at startup; if the path
+# is set but the file is ABSENT the apiserver refuses to start, which is why
+# tasks/main.yml writes it BEFORE rendering config.yaml.
+k3s_audit_policy_path: /var/lib/rancher/k3s/server/audit-policy.yaml
+
+# Extra apiserver args (servers only).
+#
+# (2026-08-05): `audit-log-path` alone had been here since the build and
+# produced a 0-byte file for a month — kube-apiserver's DEFAULT audit policy
+# records nothing, so a log path without `audit-policy-file` is decoration. The
+# policy file is what makes any of these args do anything.
+#
+# maxbackup/maxsize are not optional extras either: the log lands on the control
+# plane's 80G root disk, and `maxage` alone bounds age but not size.
+k3s_kube_apiserver_args:
+  - audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log
+  - audit-log-maxage=7
+  - audit-log-maxbackup=5
+  - audit-log-maxsize=100
+  - "audit-policy-file={{ k3s_audit_policy_path }}"
+
+# Control planes are tainted; workers are not.
+k3s_taint_control_plane: true
+
+# Where the installer comes from. Overridable for an air-gapped rebuild.
+k3s_install_url: https://get.k3s.io
+
+# --- Longhorn data disk (workers) -------------------------------------------
+# Added 2026-07-28 after the first real node-rebuild proof found this missing.
+# Off by default so control planes, which have no second disk, skip it.
+k3s_longhorn_disk: false
+k3s_longhorn_device: /dev/sdb
+k3s_longhorn_path: /var/lib/longhorn
+
+# opt in only on nodes running Longhorn; set absent for rollback.
+k3s_longhorn_multipath_manage: false
+k3s_longhorn_multipath_state: present
+
+# --- Registry / git host entry ----------------------------------------------
+# The nodes do NOT use LAN split-DNS; they resolve via 1.1.1.1/8.8.8.8, so
+# git.example.com answers with the public zone's WAN address, which does
+# not route from here. Every image pull from the OCI registry depends on this
+# entry being right.
+k3s_forgejo_host: git.example.com
+# NPM, which terminates TLS. NOT the Forgejo VM's own address (198.51.100.45):
+# it serves plain HTTP on :3000, and containerd pulls over https.
+k3s_forgejo_ip: 198.51.100.40

@@ -1,0 +1,34 @@
+# Cilium 1.17.5 — CNI + kube-proxy replacement + LB-IPAM/L2.
+# helm install cilium cilium/cilium --version 1.17.5 -n kube-system -f cilium-values.yaml
+kubeProxyReplacement: true
+k8sServiceHost: 192.0.2.10   # kube-vip API VIP (never a hostname — split DNS)
+k8sServicePort: 6443
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList: ["10.42.0.0/16"] # matches k3s --cluster-cidr
+    clusterPoolIPv4MaskSize: 24
+
+# Two-node coexistence cluster: single operator replica (grow with the cluster).
+operator:
+  replicas: 1
+
+hubble:
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+
+# Cilium owns LoadBalancer Service IPs via LB-IPAM + L2 announcements
+# (pool + policy applied separately as cilium-lb-pool.yaml). kube-vip only
+# does the control-plane API VIP.
+l2announcements:
+  enabled: true
+externalIPs:
+  enabled: true
+
+# Be gentle with the API during rollouts on a small cluster.
+k8sClientRateLimit:
+  qps: 50
+  burst: 100

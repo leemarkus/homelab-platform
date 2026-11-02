@@ -1,0 +1,44 @@
+---
+# Common setup applied to all Proxmox nodes
+- name: Common node setup
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    - name: Install common packages
+      apt:
+        name:
+          - curl
+          - wget
+          - vim
+          - htop
+          - net-tools
+          - iotop
+          - tmux
+          - git
+          - rsync
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Enable and start required services
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - ssh
+        - cron
+
+    - name: Configure sysctl for performance
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        reload: true
+      loop:
+        - { key: "vm.swappiness", value: "10" }
+        - { key: "net.core.somaxconn", value: "65535" }

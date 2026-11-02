@@ -1,0 +1,27 @@
+# node-1 — cluster-init bootstrap server. Applied at
+# /etc/rancher/k3s/config.yaml, then: curl -sfL https://get.k3s.io |
+#   INSTALL_K3S_VERSION=v1.34.4+k3s1 sh -s - server
+# Token redacted (the real value is kept outside the repository).
+cluster-init: true
+token: __TOKEN__
+tls-san:
+  - 192.0.2.10         # kube-vip API VIP (moved from .10 — old cluster owns .10)
+  - k3s.lab.example.com
+node-ip: 192.0.2.11
+disable:
+  - traefik
+  - servicelb
+  - local-storage
+flannel-backend: none          # Cilium provides CNI
+disable-network-policy: true   # Cilium provides NetworkPolicy
+disable-kube-proxy: true       # Cilium kube-proxy replacement
+secrets-encryption: true
+etcd-snapshot-schedule-cron: "0 3 * * *"
+etcd-snapshot-retention: 14
+node-taint:
+  - node-role.kubernetes.io/control-plane:NoSchedule
+node-label:
+  - topology.kubernetes.io/zone=pve-1
+kube-apiserver-arg:
+  - audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log
+  - audit-log-maxage=7

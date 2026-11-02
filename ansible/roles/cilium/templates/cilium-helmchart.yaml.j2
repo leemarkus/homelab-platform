@@ -1,0 +1,55 @@
+{{ ansible_managed | comment }}
+# Installed through k3s's built-in Helm controller rather than a helm binary:
+# the target needs no helm, no kubeconfig plumbing and no python kubernetes
+# library, and k3s re-applies this on every start so a rebuilt node comes back
+# with its CNI. Anything dropped in /var/lib/rancher/k3s/server/manifests is
+# auto-applied by k3s.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: cilium
+  namespace: kube-system
+spec:
+  # THE LOAD-BEARING LINE. Without it this cannot work, and the failure is
+  # circular rather than obvious: no CNI ⇒ node NotReady ⇒ kubernetes applies
+  # `node.kubernetes.io/not-ready:NoSchedule` ⇒ the helm-install *pod* cannot
+  # schedule ⇒ the CNI never installs. Observed exactly that way on preprod-1
+  # (2026-07-27): job Running, pod Pending 8m on "untolerated taint(s)".
+  # `bootstrap: true` tells k3s this chart is required to bring the cluster up,
+  # so the install job runs with host networking and tolerates the taints that
+  # an unready node carries. It is the k3s-native answer to installing a CNI
+  # and the reason this needs no helm binary on the node.
+  bootstrap: {{ cilium_bootstrap | bool | lower }}
+  repo: https://helm.cilium.io
+  chart: cilium
+  version: "{{ cilium_version }}"
+  targetNamespace: {{ cilium_namespace }}
+  valuesContent: |-
+    kubeProxyReplacement: true
+    k8sServiceHost: {{ cilium_k8s_service_host }}
+    k8sServicePort: {{ cilium_k8s_service_port }}
+    # Production's rate limit, carried deliberately. See the long note in
+    # defaults/main.yml: leaving this out does not fail, it quietly reverts the
+    # CNI's API client to chart defaults.
+    k8sClientRateLimit:
+      qps: {{ cilium_client_rate_limit_qps }}
+      burst: {{ cilium_client_rate_limit_burst }}
+    operator:
+      replicas: {{ cilium_operator_replicas }}
+    ipam:
+      mode: {{ cilium_ipam_mode }}
+{% if cilium_ipam_mode == 'cluster-pool' %}
+      operator:
+        clusterPoolIPv4MaskSize: {{ cilium_cluster_pool_mask_size }}
+        clusterPoolIPv4PodCIDRList:
+          - {{ cilium_cluster_pool_cidr }}
+{% endif %}
+    l2announcements:
+      enabled: {{ cilium_l2announcements | bool | lower }}
+    externalIPs:
+      enabled: {{ cilium_external_ips | bool | lower }}
+    hubble:
+      relay:
+        enabled: {{ cilium_hubble_relay | bool | lower }}
+      ui:
+        enabled: {{ cilium_hubble_ui | bool | lower }}

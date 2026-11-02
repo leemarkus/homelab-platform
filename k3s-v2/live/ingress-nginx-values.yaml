@@ -1,0 +1,26 @@
+# ingress-nginx — single ingress class, LB Service pinned to 192.0.2.200.
+# helm install ingress-nginx ingress-nginx/ingress-nginx --version 4.13.0 \
+#   -n ingress-nginx --create-namespace -f ingress-nginx-values.yaml
+controller:
+  replicaCount: 2
+  service:
+    annotations:
+      lbipam.cilium.io/ips: "192.0.2.200" # Cilium LB-IPAM fixed IP
+  ingressClassResource:
+    name: nginx
+    default: true # the one ingress class in this cluster
+  # one controller per worker
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: ingress-nginx
+                app.kubernetes.io/component: controller
+            topologyKey: kubernetes.io/hostname
+  # NPM terminates TLS and forwards HTTP with the Host header preserved, so
+  # the controller itself serves plain HTTP inside the lab.
+  metrics:
+    enabled: false

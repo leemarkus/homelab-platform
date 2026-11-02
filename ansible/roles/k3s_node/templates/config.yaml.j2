@@ -1,0 +1,73 @@
+# MANAGED BY ANSIBLE — role k3s_node. Do not edit on the node; edit the role.
+#
+# No `#jinja2:` header here on purpose: every Jinja block tag in this file sits
+# at column 0, so lstrip_blocks is unnecessary and trim_blocks is already
+# Ansible's default. Ansible consumes that header line but a plain Jinja render
+# does not, so it appeared verbatim in the config during offline testing.
+#
+# Rendered for {{ inventory_hostname }} (role {{ k3s_node_role }}) at
+# /etc/rancher/k3s/config.yaml. Hand-maintained equivalents of this file live in
+# homelab/k3s-v2/live/server-*.yaml and agent.yaml — reference only now.
+{% if k3s_node_role == 'server-init' %}
+cluster-init: true
+{% elif k3s_node_role == 'server' %}
+server: https://{{ k3s_api_vip }}:6443
+{% else %}
+server: https://{{ k3s_api_vip }}:6443
+{% endif %}
+token: "{{ k3s_token }}"
+node-ip: {{ ansible_host }}
+{% if k3s_zone | length > 0 %}
+node-label:
+  - topology.kubernetes.io/zone={{ k3s_zone }}
+{% endif %}
+
+{% if k3s_node_role in ['server-init', 'server'] %}
+tls-san:
+{% for san in k3s_tls_sans %}
+  - {{ san }}
+{% endfor %}
+disable:
+{% for d in k3s_disable %}
+  - {{ d }}
+{% endfor %}
+# Cilium replaces flannel, the network-policy controller and kube-proxy.
+flannel-backend: {{ k3s_flannel_backend }}
+disable-network-policy: {{ k3s_disable_network_policy | lower }}
+{% if k3s_disable_kube_proxy %}
+# SERVER-ONLY. On an agent this flag makes k3s-agent exit fatally (v1.34.x).
+disable-kube-proxy: true
+{% endif %}
+secrets-encryption: {{ k3s_secrets_encryption | lower }}
+etcd-snapshot-schedule-cron: "{{ k3s_etcd_snapshot_cron }}"
+etcd-snapshot-retention: {{ k3s_etcd_snapshot_retention }}
+{% if k3s_taint_control_plane %}
+node-taint:
+  - node-role.kubernetes.io/control-plane:NoSchedule
+{% endif %}
+{% if k3s_kube_apiserver_args | length > 0 %}
+kube-apiserver-arg:
+{% for a in k3s_kube_apiserver_args %}
+  - {{ a }}
+{% endfor %}
+{% endif %}
+{% if k3s_etcd_expose_metrics %}
+# Serves etcd's own metrics unauthenticated on :2381 (NOT the 2379 client port).
+# Required for etcd_disk_wal_fsync_duration_seconds — without it that metric does
+# not exist and etcd disk latency is unobservable.
+etcd-expose-metrics: {{ k3s_etcd_expose_metrics | lower }}
+{% endif %}
+{% if k3s_etcd_s3 %}
+# Off-cluster etcd snapshot upload — layer 3 of the backup posture.
+# ⚠️ this block was MISSING from the template while present on every live
+# control plane, so running this role would have silently deleted it. Do not drop
+# it again; tasks/main.yml fails closed if the credentials are absent.
+etcd-s3: true
+etcd-s3-endpoint: {{ k3s_etcd_s3_endpoint }}
+etcd-s3-insecure: {{ k3s_etcd_s3_insecure | lower }}
+etcd-s3-bucket: {{ k3s_etcd_s3_bucket }}
+etcd-s3-folder: {{ k3s_etcd_s3_folder }}
+etcd-s3-access-key: {{ k3s_etcd_s3_access_key }}
+etcd-s3-secret-key: {{ k3s_etcd_s3_secret_key }}
+{% endif %}
+{% endif %}

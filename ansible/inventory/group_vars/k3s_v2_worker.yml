@@ -1,0 +1,15 @@
+---
+# Workers. NOTE the Cilium flags are emitted only for server roles by the
+# template — `disable-kube-proxy` on an agent is fatal on k3s v1.34.x.
+k3s_node_role: agent
+k3s_taint_control_plane: false
+
+# Workers carry a second disk (scsi1, 120 GB in tofu) for Longhorn. Provisioning
+# it was missing from the build chain entirely until 2026-07-28, when the first
+# real rebuild of node-4 produced a node that joined Ready, ran Cilium and
+# scheduled pods — with no storage and no complaint. Control planes have no such
+# disk, which is why this is set per-group rather than in the role's defaults.
+k3s_longhorn_disk: true
+
+# this group runs Longhorn and needs its iSCSI devices excluded.
+k3s_longhorn_multipath_manage: true

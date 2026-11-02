@@ -1,0 +1,51 @@
+---
+# hardening role defaults — the third missing piece of node IaC.
+#
+# DESIGN RULE: nothing here may plausibly lock you out of a node or break k3s.
+# A homelab node you cannot SSH into after a "hardening" run is a worse outcome
+# than an unhardened one, and the failure surfaces at the worst possible time —
+# during a rebuild, when you are already recovering from something.
+#
+# Explicitly NOT done, with reasons, so nobody adds them thinking they were
+# forgotten:
+#
+#   * No host firewall (ufw/nftables rules). k3s + Cilium + Longhorn + kube-vip
+#     need a wide, version-dependent port set (6443, 10250, 2379-2380, 8472,
+#     4240, 9500-9503, 179, VXLAN/geneve, plus ephemeral). A partial ruleset
+#     produces intermittent CNI and storage faults that look like hardware
+#     problems. The cluster VLAN boundary on OPNsense is the network control; that is
+#     where a firewall belongs.
+#   * No auditd. Meaningful volume, no consumer — nothing ships or reads these
+#     logs today. Add it when there is somewhere for the events to go.
+#   * No automatic reboots. unattended-upgrades installs security patches but
+#     never reboots: system-upgrade-controller owns k3s upgrades and node drain
+#     ordering, and an unplanned 03:00 reboot on a 3-node etcd quorum is how you
+#     lose quorum by accident.
+#   * No SELinux/AppArmor profile changes. Ubuntu 24.04's defaults are fine and
+#     container runtimes are sensitive to hand-rolled profiles.
+
+# SSH. Password auth is already off in the cloud-init template; this asserts it
+# rather than assuming, since a rebuilt template could regress it silently.
+harden_ssh: true
+harden_ssh_permit_root_login: "no"
+harden_ssh_password_authentication: "no"
+harden_ssh_max_auth_tries: 4
+
+# Kernel parameters. Only ones that are safe alongside Cilium's own sysctl
+# management — Cilium sets its own forwarding and rp_filter values, so those are
+# left alone on purpose.
+harden_sysctl: true
+
+# Security patches only, no reboot. See the note above.
+harden_unattended_upgrades: true
+
+# Automatic reboot after a patch that requires one (/var/run/reboot-required).
+# DEFAULT FALSE, and it must stay false for k3s nodes — an unplanned reboot on
+# a 3-node etcd quorum is how you lose quorum by accident; SUC owns k3s node
+# reboots via drains. Enable per-host/group only for single-purpose VMs whose
+# brief absence is acceptable (tier VMs, Pi, PBS — see
+# playbooks/unattended-upgrades.yml for the lab posture and window choices).
+harden_unattended_reboot: false
+# Local time. Pick a window clear of the backup timeline (22:30 vzdump, 02:00
+# second pass + Velero, 02:30 pbs2 pull-sync, 03:00 etcd, 03:30 prunes/dumps).
+harden_unattended_reboot_time: "04:30"

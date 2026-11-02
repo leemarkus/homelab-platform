@@ -1,0 +1,10 @@
+NAME      TYPE  VENDOR   MODEL         SIZE TRAN
+sda       disk  QEMU     QEMU_HARDDISK   80G
+├─sda1    part                        79.9G
+├─sda14   part                           4M
+└─sda15   part                         106M
+sdb       disk  QEMU     QEMU_HARDDISK  120G
+sdc       disk  IET      VIRTUAL-DISK    10G iscsi
+└─mpatha  mpath                         10G
+sdd       disk  IET      VIRTUAL-DISK     5G iscsi
+└─mpathb  mpath                          5G

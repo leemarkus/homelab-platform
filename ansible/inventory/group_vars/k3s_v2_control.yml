@@ -1,0 +1,29 @@
+---
+# Control-plane nodes. node-1 bootstrapped etcd, so it alone is server-init;
+# the other two join through the VIP. Overridden per host for node-1.
+k3s_node_role: server
+k3s_taint_control_plane: true
+
+# --- CNI (adopted into code 2026-07-28) ---
+# Production's Cilium was a hand-run `helm install` from 2026-07-04, owned by no
+# code, which made the claim that any node is rebuildable from code false: the
+# k3s_node role writes `flannel-backend: none` + `disable-kube-proxy: true`, so
+# a rebuilt node comes up NotReady with no pod networking and nothing to fix it.
+# ADR 0011 decision 1 and the component gate audit both land on this component.
+#
+# ON ALL THREE CONTROL PLANES, NOT ONE. /var/lib/rancher/k3s/server/manifests is
+# per-node; the HelmChart CR it produces is cluster-scoped and identical, so
+# applying it three times is idempotent. Placing it on a single node would mean
+# rebuilding *that* node silently ends the code ownership this establishes —
+# which is the exact failure this whole exercise exists to remove.
+#
+# Adoption itself was a one-time act gated behind `-e cilium_adopt=true`; that
+# flag is deliberately NOT set here. Steady-state runs find the manifest already
+# present and change nothing.
+cilium_manage: true
+
+# The kube-vip VIP. Cilium replaces kube-proxy, so it cannot reach the API
+# through the in-cluster Service — it has not yet provided the networking that
+# Service depends on. This is the one value that legitimately differs between
+# production and the single-node pre-prod.
+cilium_k8s_service_host: 192.0.2.10

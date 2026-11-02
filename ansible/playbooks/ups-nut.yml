@@ -1,0 +1,404 @@
+---
+# NUT (Network UPS Tools) for the CyberPower ST625U that protects all five
+# Proxmox hosts (on one power extension plugged into the UPS battery outlets).
+#
+# Topology: all five Proxmox nodes plus the workstation and a laptop are on
+# the ST625U, **221 W of 375 W (59 %)**, measured 2026-07-19 (up from the
+# ~130 W this file used to assume). battery.runtime at 100 % charge is only
+# ~425-525 s, so shut down EARLY. Moving the workstation and laptop to the
+# surge-only outlets is the single biggest margin win available (see
+# docs/runbooks/ups-pull-plug-test.md).
+#
+# **pve-4** has the USB data cable = NUT MASTER (netserver) and shuts down
+# LAST (it hosts the storage the others depend on). pve-1, pve-2, pve-3 and
+# pve-5 are netclients. The workstation and the Raspberry Pi are not NUT
+# clients; the orchestrator shuts them down over SSH.
+#
+# PREREQS (see docs/runbooks/ups-shutdown.md):
+#   1. ST625U USB cable on **pve-4** (lsusb shows 0764:...).
+#   2. Reachability to pve-4 :3493. pve-1/pve-3 share its subnet; pve-2
+#      (cluster VLAN) routes to 198.51.100.14 the same way it reaches TrueNAS;
+#      pve-5 (sandbox VLAN) needs a narrow OPNsense rule
+#      (203.0.113.15 -> 198.51.100.14 tcp/3493).
+#   3. Secrets in a 0600 vars file kept outside the repository
+#      (`-e @nut-vars.yml`). It must carry nut_monitor_password,
+#      nut_ntfy_topic, nut_ntfy_topic_status and nut_instcmd_password
+#      (the labshut credential, required since 2026-07-29).
+#
+# KEY RENAME 2026-09-14: `nut_ntfy_topic_notify` -> `nut_ntfy_topic_status`,
+# and its VALUE changed from the retired middle-tier topic to the STATUS
+# topic. A run with the old key FAILS at the assert in front of the
+# notify.env task (the key names are printed, never the values) rather than
+# proceeding; the script's page-everything fallback stays as
+# defence-in-depth behind it.
+#
+# Two topics, two tiers (2026-09-11; retiered 2026-09-14):
+# `nut_ntfy_topic` MUST be the **PAGE**-tier topic (NTFY_TOPIC_PAGE). It
+# carries ONBATT / LOWBATT / FSD / SHUTDOWN, the "the lab is going down"
+# events. ONBATT moved back to page on 2026-09-14 when the middle tier was
+# retired: losing mains power is act-now, and the do-not-disturb-respecting
+# tier that used to hold it no longer exists. `nut_ntfy_topic_status` is the
+# **STATUS**-tier topic (NTFY_TOPIC_STATUS) and carries ONLINE / COMMBAD /
+# COMMOK / REPLBATT, the after-the-fact half, which belongs on the muted
+# status channel next to everything else that is FYI. NUT posts them
+# DIRECTLY rather than through Alertmanager: the status board summarises
+# Alertmanager state, while these are one-off events.
+# If the status topic is unset the script falls back to paging everything.
+# That fallback is unreachable through a normal run (the assert in front of
+# the notify.env task refuses an empty topic) and is kept as defence-in-depth
+# for a notify.env edited by hand on the box: over-paging is recoverable,
+# silence is not. This is the one sender that must survive the lab dying, so
+# it posts to ntfy.sh directly and never transits an Alertmanager or a
+# bridge.
+#
+# Run (all hosts, from ansible/, with inventory/hosts.yml copied from
+# inventory/hosts.example.yml):
+#   ansible-playbook -i inventory/hosts.yml playbooks/ups-nut.yml \
+#     -e @nut-vars.yml
+# (the pve-5 OPNsense rule is in place, verified reading OL from pve-5 on
+#  2026-07-29, so no --limit is needed)
+#
+# ALWAYS supply nut_ntfy_topic (it is in the vars file). The notify.env task
+# has no `force: false`, so a run without it would WIPE the ntfy topic and
+# silently disable outage alerting (trap found by the 2026-07-19 dry run; the
+# assert below now blocks it).
+#
+# The LB trigger and guest-shutdown timing were validated by the 2026-07-19
+# pull-plug test (shutdown passed, battery healthy) and retuned from its
+# measurements; see docs/runbooks/ups-pull-plug-test.md.
+
+- name: NUT master — pve-4 (owns the USB link)
+  hosts: pve-4
+  become: true
+  vars:
+    nut_monitor_password: "{{ nut_monitor_password | default('CHANGE_ME') }}"
+  tasks:
+    - name: Install NUT
+      apt: { name: nut, state: present, update_cache: true }
+
+    - name: nut.conf — netserver mode
+      copy: { dest: /etc/nut/nut.conf, mode: "0640", content: "MODE=netserver\n" }
+      notify: restart nut
+
+    - name: ups.conf — ST625U on USB, EARLY low-battery trigger
+      copy:
+        dest: /etc/nut/ups.conf
+        mode: "0640"
+        content: |
+          [st625u]
+            driver = usbhid-ups
+            port = auto
+            desc = "CyberPower ST625U"
+            # LB TRIGGER — tuned from the 2026-07-19 pull-plug test.
+            #
+            # `battery.charge.low` is NOT the trigger at this load and was
+            # removed 2026-07-19: LB fired at T0+40 s via runtime.low while
+            # charge was still ~92 %. Charge would not reach 50-60 % until
+            # ~170-200 s into the drain, i.e. LATER. Re-adding it (or raising
+            # it to 60, as the pre-test notes wrongly suggested) is a no-op.
+            #
+            # `battery.runtime.low` IS the trigger. On battery at ~221 W the
+            # UPS recomputes reported runtime down to R0 ~340 s almost at
+            # once, then decays ~1 s/s — so the whole usable range of this
+            # knob sits between 300 (fires at +40 s) and ~340 (fires at the
+            # first poll). It cannot buy more than those 40 s: cut load or
+            # shorten the cascade for real margin.
+            #
+            # 330 is deliberate, NOT the max. It should fire ~10 s into the
+            # drain — most of the 40 s back, while still requiring the outage
+            # to persist ~10 s. Going >=340 fires at the first poll, which
+            # makes a 5 s grid blip shut down the whole lab. R0 ~340 is
+            # inferred from ONE data point, so this is sensitive: if R0 is
+            # really ~320 this value also fires instantly. Re-measure with the
+            # 2 s upsc poll (see docs/runbooks/ups-pull-plug-test.md) before
+            # trusting it.
+            override.battery.runtime.low = 330
+            # shutdown.return timing (the ST625U supports it — upscmd -l,
+            # 2026-07-29). nut-lab-shutdown.sh issues it just before pve-4
+            # halts, so the UPS drops its outlets and re-energises when
+            # mains returns — the AC transition the BIOS auto-power
+            # settings need. killpower is a no-op on this unit; this
+            # replaces it. offdelay must outlive pve-4's own halt (guests
+            # bounded at 20 s + host teardown; 120 s is ~2x the worst
+            # observed) and ondelay must exceed offdelay (usbhid-ups
+            # rule). The pull-plug re-drill is their live test.
+            offdelay = 120
+            ondelay = 180
+      notify:
+        # ups.conf is read by the DRIVER — "restart nut" alone leaves it
+        # running with stale offdelay/ondelay (bitten live 2026-07-29).
+        - restart nut driver
+        - restart nut
+
+    - name: upsd.conf — listen for netclients on the LAN
+      copy:
+        dest: /etc/nut/upsd.conf
+        mode: "0640"
+        content: |
+          LISTEN 127.0.0.1 3493
+          LISTEN 198.51.100.14 3493
+      notify: restart nut
+
+    - name: upsd.users — monitor account (master)
+      copy:
+        dest: /etc/nut/upsd.users
+        mode: "0640"
+        content: |
+          # upsmon stays monitor-only: its password is distributed to every
+          # netclient's upsmon.conf while upsd listens on the LAN, so granting
+          # it instcmds would hand any compromised client a hard-power-cut
+          # path to the whole rack (security review 2026-07-29).
+          [upsmon]
+            password = {{ nut_monitor_password }}
+            upsmon master
+          # Orchestrator account for nut-lab-shutdown.sh only. Password lives
+          # solely on pve-4 in root-only /etc/nut/labshut.pass — never on a
+          # netclient. beeper.enable is granted purely as a harmless no-op
+          # for verifying auth/tracking without touching the load.
+          [labshut]
+            password = {{ nut_instcmd_password }}
+            instcmds = shutdown.return
+            instcmds = beeper.enable
+      # Keep credentials out of --diff/log output.
+      no_log: true
+      diff: false
+      notify: restart nut
+
+    - name: Fast guest-shutdown helper (VMs down, then poweroff)
+      copy:
+        dest: /usr/local/sbin/nut-host-shutdown.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Shut down all running guests fast, then power the host off.
+          # Timeouts cut 45 -> 20 on 2026-07-19: the pull-plug test spent
+          # ~135 s here against a 45 s nominal cap, and the cascade is 74 % of
+          # the battery budget. pct had NO timeout at all (it inherits a 60 s
+          # default), so the LXC leg was unbounded in practice.
+          for id in $(qm list | awk '$3=="running"{print $1}'); do
+            qm shutdown "$id" --timeout 20 --forceStop 1 &
+          done
+          for id in $(pct list | awk '$2=="running"{print $1}'); do
+            pct shutdown "$id" --timeout 20 --forceStop 1 &
+          done
+          wait
+          /sbin/shutdown -h +0
+
+    - name: labshut.pass — orchestrator instcmd credential (pve-4, root-only)
+      # Read by nut-lab-shutdown.sh to issue shutdown.return. Deliberately a
+      # separate credential from upsmon's (see upsd.users comment above).
+      copy:
+        dest: /etc/nut/labshut.pass
+        mode: "0600"
+        content: "{{ nut_instcmd_password }}\n"
+      no_log: true
+      diff: false
+
+    - name: Lab-wide shutdown orchestrator (master SHUTDOWNCMD)
+      # Runs on pve-4 when the UPS hits LB: brings down the non-NUT devices
+      # (Raspberry Pi, OPNsense, workstation) + the Proxmox netclients in a
+      # dependency-safe order, then powers off pve-4 itself LAST. See the script
+      # header and docs/runbooks/ups-shutdown.md.
+      copy:
+        src: "{{ playbook_dir }}/../../scripts/nut-lab-shutdown.sh"
+        dest: /usr/local/sbin/nut-lab-shutdown.sh
+        mode: "0755"
+
+    - name: lab-shutdown.conf — host-specific overrides (workstation etc.)
+      # Host details for the orchestrator that stay out of the repository.
+      # Set the workstation IP/user on the box or pass -e nut_workstation_*.
+      # An empty WORKSTATION_HOST is skipped safely. Never commit real values.
+      copy:
+        dest: /etc/nut/lab-shutdown.conf
+        mode: "0640"
+        content: |
+          # Overrides for /usr/local/sbin/nut-lab-shutdown.sh
+          # (variable names match the script).
+          WORKSTATION_HOST={{ nut_workstation_host | default('') }}
+          WORKSTATION_USER={{ nut_workstation_user | default('') }}
+          WORKSTATION_METHOD={{ nut_workstation_method | default('osascript') }}
+          # ROUTER_GRACE={{ nut_router_grace | default(10) }}
+        force: false   # don't clobber values the operator edited on the box
+
+    # Both topics must be SUPPLIED, not defaulted. The task below has no
+    # `force: false`, so a run missing either var rewrites /etc/nut/notify.env
+    # with an empty value and the outage path goes quiet (page) or lands on the
+    # page tier (status) — both silently, at the one moment nobody is watching
+    # a playbook run. Fail here instead, naming the KEYS.
+    #
+    # NO VALUE EVER REACHES THE OUTPUT, and deliberately without `no_log`.
+    # `assert` reports the failing condition as its SOURCE TEXT plus
+    # `evaluated_to: false` — it never renders the operand — and every message
+    # below names KEYS only. `no_log: true` would censor the whole result
+    # including the fail_msg, which is the entire reason this task exists: a
+    # `censored` line tells the operator nothing about which key is missing.
+    # So: keep the messages value-free, and do not add interpolation here.
+    - name: assert — both NUT ntfy topics are supplied (keys only, never values)
+      assert:
+        that:
+          - nut_ntfy_topic is defined
+          - (nut_ntfy_topic | default('', true) | trim | length) > 0
+          - nut_ntfy_topic_status is defined
+          - (nut_ntfy_topic_status | default('', true) | trim | length) > 0
+        fail_msg: >-
+          nut_ntfy_topic (PAGE tier) and nut_ntfy_topic_status (STATUS tier)
+          must both be set and non-empty. Pass the secret vars file kept
+          outside the repository: -e @nut-vars.yml. If that file still
+          carries nut_ntfy_topic_notify, rename the key to
+          nut_ntfy_topic_status and give it the STATUS topic (KEY RENAME
+          2026-09-14, see this file's header).
+        success_msg: both NUT ntfy topic vars are present
+        quiet: true
+
+    - name: notify.env — push targets for NUT events (ntfy + optional Telegram)
+      no_log: true   # the rendered file carries ntfy topics and tokens
+      diff: false
+      copy:
+        dest: /etc/nut/notify.env
+        mode: "0640"
+        # NOTIFYCMD runs as the unprivileged nut user; a root-only file here
+        # silently broke alerting once (2026-09-11).
+        group: nut
+        # Secrets/topics are passed at runtime (-e) and default to inert, so
+        # the file is safe and the optional Telegram push stays off unless a
+        # token and chat id are supplied.
+        content: |
+          NTFY_SERVER={{ nut_ntfy_server | default('https://ntfy.sh') }}
+          NTFY_TOPIC={{ nut_ntfy_topic | default('') }}
+          NTFY_TOPIC_STATUS={{ nut_ntfy_topic_status | default('') }}
+          TG_TOKEN={{ nut_telegram_token | default('PENDING') }}
+          TG_CHATID={{ nut_telegram_chatid | default('') }}
+
+    - name: nut-notify.sh — push UPS events to ntfy (+ Telegram) (master only)
+      copy:
+        dest: /usr/local/sbin/nut-notify.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # NUT NOTIFYCMD. Runs on the MASTER (pve-4) only, so each power
+          # event notifies once. Topics/token live in /etc/nut/notify.env
+          # (root:nut 0640, because upsmon runs this as nut).
+          [ -f /etc/nut/notify.env ] && . /etc/nut/notify.env
+          TYPE="${NOTIFYTYPE:-UNKNOWN}"
+          UPS=st625u
+          STAT=$(upsc "$UPS" ups.status 2>/dev/null || echo '?')
+          CHG=$(upsc "$UPS" battery.charge 2>/dev/null || echo '?')
+          RUN=$(upsc "$UPS" battery.runtime 2>/dev/null || echo '?')
+          LOAD=$(upsc "$UPS" ups.load 2>/dev/null || echo '?')
+          RUNMIN='?'; [ "$RUN" != '?' ] && RUNMIN=$((RUN/60))
+          # Tier routing (2026-09-14, two tiers): events that mean "the lab is
+          # going down" PAGE — ONBATT included, because mains power is gone and
+          # the runtime is ~7 minutes. Everything after the fact goes to the
+          # muted STATUS board topic. An unset status topic falls back to the
+          # page topic: over-paging is recoverable, silence is not.
+          PAGE="$NTFY_TOPIC"; STATUS="${NTFY_TOPIC_STATUS:-$NTFY_TOPIC}"
+          case "$TYPE" in
+            ONBATT)   TITLE="UPS ON BATTERY - power lost";        PRIO=high;    TAGS="warning,electric_plug";          TOPIC=$PAGE ;;
+            LOWBATT)  TITLE="UPS LOW BATTERY - shutdown imminent"; PRIO=urgent;  TAGS="rotating_light,battery";         TOPIC=$PAGE ;;
+            FSD)      TITLE="UPS forced shutdown in progress";     PRIO=urgent;  TAGS="rotating_light";                 TOPIC=$PAGE ;;
+            SHUTDOWN) TITLE="Host shutting down (UPS)";            PRIO=urgent;  TAGS="rotating_light";                 TOPIC=$PAGE ;;
+            ONLINE)   TITLE="UPS back online - power restored";    PRIO=default; TAGS="white_check_mark,electric_plug"; TOPIC=$STATUS ;;
+            REPLBATT) TITLE="UPS battery needs replacing";         PRIO=low;     TAGS="wrench";                         TOPIC=$STATUS ;;
+            COMMBAD|NOCOMM) TITLE="Lost communication with UPS";   PRIO=default; TAGS="warning";                        TOPIC=$STATUS ;;
+            COMMOK)   TITLE="UPS communication restored";          PRIO=default; TAGS="information_source";             TOPIC=$STATUS ;;
+            *)        TITLE="UPS event: $TYPE";                    PRIO=default; TAGS="information_source";             TOPIC=$STATUS ;;
+          esac
+          BODY="$TYPE on $(hostname)
+          status=$STAT  charge=${CHG}%  load=${LOAD}%  runtime~${RUNMIN}min"
+          if [ -n "${TOPIC:-}" ]; then
+            curl -fsS --max-time 10 -H "Title: $TITLE" -H "Priority: $PRIO" \
+              -H "Tags: $TAGS" -d "$BODY" \
+              "${NTFY_SERVER:-https://ntfy.sh}/$TOPIC" >/dev/null 2>&1 || true
+          fi
+          if [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHATID:-}" ] && [ "$TG_TOKEN" != PENDING ]; then
+            curl -fsS --max-time 10 \
+              --data-urlencode "chat_id=$TG_CHATID" \
+              --data-urlencode "text=$TITLE
+          $BODY" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" >/dev/null 2>&1 || true
+          fi
+          exit 0
+
+    - name: upsmon.conf — master (+ NOTIFYCMD push)
+      copy:
+        dest: /etc/nut/upsmon.conf
+        mode: "0640"
+        content: |
+          MONITOR st625u@localhost 1 upsmon {{ nut_monitor_password }} master
+          MINSUPPLIES 1
+          # Master orchestrates the whole lab (non-NUT devices + pve-4 last).
+          SHUTDOWNCMD "/usr/local/sbin/nut-lab-shutdown.sh"
+          POWERDOWNFLAG /etc/killpower
+          NOTIFYCMD "/usr/local/sbin/nut-notify.sh"
+          NOTIFYFLAG ONLINE   SYSLOG+WALL+EXEC
+          NOTIFYFLAG ONBATT   SYSLOG+WALL+EXEC
+          NOTIFYFLAG LOWBATT  SYSLOG+WALL+EXEC
+          NOTIFYFLAG FSD      SYSLOG+WALL+EXEC
+          NOTIFYFLAG SHUTDOWN SYSLOG+WALL+EXEC
+          NOTIFYFLAG REPLBATT SYSLOG+WALL+EXEC
+          NOTIFYFLAG COMMBAD  SYSLOG+EXEC
+          NOTIFYFLAG COMMOK   SYSLOG+EXEC
+      notify: restart nut
+
+    - name: Enable + start NUT
+      systemd: { name: "{{ item }}", enabled: true, state: started }
+      loop: [nut-driver-enumerator, nut-server, nut-monitor]
+
+  handlers:
+    # Listed before "restart nut" so the driver comes up first when both fire.
+    - name: restart nut driver
+      systemd: { name: nut-driver@st625u, state: restarted }
+    - name: restart nut
+      systemd: { name: "{{ item }}", state: restarted }
+      loop: [nut-server, nut-monitor]
+
+- name: NUT netclients — pve-1, pve-2, pve-3, pve-5
+  hosts: pve-1,pve-2,pve-3,pve-5
+  become: true
+  vars:
+    nut_monitor_password: "{{ nut_monitor_password | default('CHANGE_ME') }}"
+  tasks:
+    - name: Install NUT
+      apt: { name: nut, state: present, update_cache: true }
+
+    - name: nut.conf — netclient mode
+      copy:
+        dest: /etc/nut/nut.conf
+        mode: "0640"
+        content: "MODE=netclient\n"
+
+    - name: Fast guest-shutdown helper
+      copy:
+        dest: /usr/local/sbin/nut-host-shutdown.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Timeouts 45 -> 20 and pct given an explicit bound, 2026-07-19 —
+          # see the master copy of this helper above for the reasoning.
+          for id in $(qm list | awk '$3=="running"{print $1}'); do
+            qm shutdown "$id" --timeout 20 --forceStop 1 &
+          done
+          for id in $(pct list | awk '$2=="running"{print $1}'); do
+            pct shutdown "$id" --timeout 20 --forceStop 1 &
+          done
+          wait
+          /sbin/shutdown -h +0
+
+    - name: upsmon.conf — netclient (slave) pointing at the master on pve-4
+      copy:
+        dest: /etc/nut/upsmon.conf
+        mode: "0640"
+        content: |
+          MONITOR st625u@198.51.100.14 1 upsmon {{ nut_monitor_password }} slave
+          MINSUPPLIES 1
+          SHUTDOWNCMD "/usr/local/sbin/nut-host-shutdown.sh"
+          NOTIFYFLAG ONBATT SYSLOG+WALL
+          NOTIFYFLAG LOWBATT SYSLOG+WALL
+      notify: restart upsmon
+
+    - name: Enable + start upsmon
+      systemd: { name: nut-monitor, enabled: true, state: started }
+
+  handlers:
+    - name: restart upsmon
+      systemd: { name: nut-monitor, state: restarted }

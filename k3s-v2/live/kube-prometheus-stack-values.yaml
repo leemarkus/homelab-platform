@@ -1,0 +1,61 @@
+# kube-prometheus-stack — cluster metrics + alerting.
+# helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#   --version 75.6.0 -n monitoring --create-namespace -f this.yaml
+#
+# NOTE: ADR 0008 wants Grafana OFF here (single pane on the .92 VM). It is
+# enabled in-cluster for now as an immediate, self-contained result; repoint
+# to .92 later by exposing Prometheus and disabling this Grafana.
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    replicas: 1
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { memory: 1500Mi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 15Gi } }
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+
+grafana:
+  enabled: true
+  defaultDashboardsTimezone: America/New_York
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki.monitoring.svc.cluster.local:3100
+      access: proxy
+  persistence:
+    enabled: true
+    storageClassName: longhorn
+    size: 2Gi
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts: ["grafana-k3s.lab.example.com"]
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+
+# small cluster — trim the heaviest default scrape targets we don't need
+kubeEtcd:
+  enabled: true
+kubeControllerManager:
+  enabled: false # k3s embeds these; endpoints not separately scrapable by default
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false # replaced by Cilium
